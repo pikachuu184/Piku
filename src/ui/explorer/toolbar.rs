@@ -107,11 +107,14 @@ impl ExplorerPanel {
                     )),
                 ),
             )
+            // Input size tiers across PIKU: Small (30px) for toolbar inputs,
+            // Large (40px) for dialog inputs. Keep new inputs on one of these.
             .child(
                 div()
-                    .w(px(170.))
-                    .flex_none()
-                    .child(Input::new(&self.filter_input).xsmall().cleanable(true)),
+                    .w(px(220.))
+                    .max_w(px(280.))
+                    .flex_shrink(1.)
+                    .child(Input::new(&self.filter_input).small().cleanable(true)),
             )
             .child(
                 Button::new("sort-menu")

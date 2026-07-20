@@ -63,7 +63,8 @@ pub(super) fn rename_selected(
             .title("Rename")
             .w(px(380.))
             .content(move |content, _, _| {
-                content.child(div().py_2().child(Input::new(&input)))
+                // Dialog inputs use the Large (40px) tier — see toolbar.rs.
+                content.child(div().py_2().child(Input::new(&input).large().cleanable(true)))
             })
             .footer(action_footer("Rename"))
             .on_ok(move |_, window, cx| {
@@ -108,7 +109,7 @@ pub(super) fn new_folder(
             .title("New folder")
             .w(px(380.))
             .content(move |content, _, _| {
-                content.child(div().py_2().child(Input::new(&input)))
+                content.child(div().py_2().child(Input::new(&input).large().cleanable(true)))
             })
             .footer(action_footer("Create"))
             .on_ok(move |_, window, cx| {
