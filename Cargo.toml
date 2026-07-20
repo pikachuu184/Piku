@@ -1,0 +1,36 @@
+[package]
+name = "piku"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Supply-chain pinning: the zed (gpui) crates are pinned via the committed
+# Cargo.lock (rev f14fea9bf3c93797d5161f7440ed418655bc6c57) — a hard `rev=`
+# here would split the graph from gpui-component's own un-revved gpui dep.
+# The longbridge crates below ARE hard-pinned; bump deliberately, never
+# implicitly (`cargo update` moves the zed pin — review before committing).
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+rust-embed = "8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+notify = "8"
+trash = "5"
+dirs = "6"
+open = "5"
+chrono = "0.4"
+sysinfo = "0.33"
+
+[profile.dev]
+debug = "limited"
+
+[profile.release]
+lto = "thin"

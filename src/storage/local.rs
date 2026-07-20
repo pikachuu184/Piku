@@ -1,0 +1,167 @@
+//! Local filesystem provider. Every call sanitizes its paths through the
+//! [`PathGuard`] before touching the disk, and every mutation is audited.
+
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use anyhow::{Context as _, bail};
+
+use crate::core::entry::FsEntry;
+use crate::security::audit;
+use crate::security::path_guard::PathGuard;
+use crate::storage::provider::{ProgressFn, StorageProvider};
+
+const COPY_CHUNK: usize = 1024 * 1024;
+
+pub struct LocalProvider {
+    guard: PathGuard,
+}
+
+impl LocalProvider {
+    pub fn new() -> Self {
+        Self {
+            guard: PathGuard::with_system_roots(),
+        }
+    }
+
+    pub fn guard(&self) -> &PathGuard {
+        &self.guard
+    }
+}
+
+impl StorageProvider for LocalProvider {
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    fn list(&self, dir: &Path) -> anyhow::Result<Vec<FsEntry>> {
+        let dir = self.guard.sanitize(dir)?;
+        let mut entries = Vec::new();
+        for item in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+            let Ok(item) = item else { continue };
+            let path = item.path();
+            // symlink_metadata so links are shown as links, never traversed.
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            entries.push(FsEntry::from_metadata(path, &metadata));
+        }
+        Ok(entries)
+    }
+
+    fn stat(&self, path: &Path) -> anyhow::Result<FsEntry> {
+        let path = self.guard.sanitize(path)?;
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("reading metadata of {}", path.display()))?;
+        Ok(FsEntry::from_metadata(path, &metadata))
+    }
+
+    fn create_dir(&self, path: &Path) -> anyhow::Result<()> {
+        let path = self.guard.sanitize(path)?;
+        if path.exists() {
+            bail!("`{}` already exists", path.display());
+        }
+        let result = fs::create_dir(&path).with_context(|| format!("creating {}", path.display()));
+        audit::record(
+            "create_dir",
+            &path,
+            None,
+            result.is_ok(),
+            result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+        );
+        result
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> anyhow::Result<()> {
+        let from = self.guard.sanitize(from)?;
+        let to = self.guard.sanitize(to)?;
+        if to.exists() {
+            bail!("`{}` already exists", to.display());
+        }
+        let result =
+            fs::rename(&from, &to).with_context(|| format!("renaming {}", from.display()));
+        audit::record(
+            "rename",
+            &from,
+            Some(&to),
+            result.is_ok(),
+            result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+        );
+        result
+    }
+
+    fn copy_file(
+        &self,
+        from: &Path,
+        to: &Path,
+        progress: ProgressFn,
+        cancel: &AtomicBool,
+    ) -> anyhow::Result<u64> {
+        let from = self.guard.sanitize(from)?;
+        let to = self.guard.sanitize(to)?;
+
+        let mut src =
+            fs::File::open(&from).with_context(|| format!("opening {}", from.display()))?;
+        let mut dst =
+            fs::File::create(&to).with_context(|| format!("creating {}", to.display()))?;
+
+        let mut buffer = vec![0u8; COPY_CHUNK];
+        let mut copied: u64 = 0;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                drop(dst);
+                let _ = fs::remove_file(&to);
+                audit::record("copy_file", &from, Some(&to), false, "cancelled");
+                bail!("cancelled");
+            }
+            let read = src.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            dst.write_all(&buffer[..read])?;
+            copied += read as u64;
+            progress(read as u64);
+        }
+        dst.flush()?;
+        audit::record("copy_file", &from, Some(&to), true, "");
+        Ok(copied)
+    }
+
+    fn delete_to_trash(&self, paths: &[PathBuf]) -> anyhow::Result<()> {
+        let mut sanitized = Vec::with_capacity(paths.len());
+        for path in paths {
+            sanitized.push(self.guard.sanitize(path)?);
+        }
+        let result = trash::delete_all(&sanitized).context("moving items to the recycle bin");
+        for path in &sanitized {
+            audit::record(
+                "delete_to_trash",
+                path,
+                None,
+                result.is_ok(),
+                result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+            );
+        }
+        result
+    }
+
+    fn remove_after_move(&self, path: &Path) -> anyhow::Result<()> {
+        let path = self.guard.sanitize(path)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        let result = if metadata.is_dir() {
+            fs::remove_dir(&path).with_context(|| format!("removing {}", path.display()))
+        } else {
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))
+        };
+        audit::record(
+            "remove_after_move",
+            &path,
+            None,
+            result.is_ok(),
+            result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+        );
+        result
+    }
+}
