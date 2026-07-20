@@ -27,7 +27,9 @@ use crate::app::actions::{self as actions};
 use crate::core::entry::FsEntry;
 use crate::services::watcher::DirWatcher;
 use crate::state::PikuState;
-use crate::state::pane_state::{PaneSession, SortBy, ViewMode, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
+use crate::state::pane_state::{
+    MAX_HISTORY, PaneSession, SortBy, ViewMode, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP,
+};
 use crate::ui::components::empty_state;
 
 pub struct ExplorerPanel {
@@ -68,6 +70,20 @@ impl ExplorerPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         session.zoom = session.zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+
+        // Restored paths are re-authorized and must still exist; anything
+        // that fails is silently dropped. The stacks live on the panel — the
+        // session copies are only a serialization vehicle (see `dump`).
+        let guard = crate::storage::local().guard().clone();
+        let sane = |p: &PathBuf| guard.sanitize(p).ok().filter(|p| p.is_dir());
+        let back_stack: Vec<PathBuf> = session.back_stack.iter().filter_map(&sane).collect();
+        let fwd_stack: Vec<PathBuf> = session.fwd_stack.iter().filter_map(&sane).collect();
+        session.back_stack = Vec::new();
+        session.fwd_stack = Vec::new();
+        if sane(&session.cwd).is_none() {
+            session.cwd = crate::services::fs_service::home_dir();
+        }
+
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter…"));
 
         let mut subscriptions = Vec::new();
@@ -93,8 +109,8 @@ impl ExplorerPanel {
             entries: Vec::new(),
             selected: BTreeSet::new(),
             anchor: None,
-            back_stack: Vec::new(),
-            fwd_stack: Vec::new(),
+            back_stack,
+            fwd_stack,
             filter_input,
             loading: true,
             error: None,
@@ -720,8 +736,17 @@ impl Panel for ExplorerPanel {
     }
 
     fn dump(&self, _cx: &App) -> PanelState {
+        // The live history stacks ride along in the serialized session
+        // (capped) so back/forward survive a restart.
+        fn tail(stack: &[PathBuf], cap: usize) -> Vec<PathBuf> {
+            stack[stack.len().saturating_sub(cap)..].to_vec()
+        }
+        let mut session = self.session.clone();
+        session.back_stack = tail(&self.back_stack, MAX_HISTORY);
+        session.fwd_stack = tail(&self.fwd_stack, MAX_HISTORY);
+
         let mut state = PanelState::new(self);
-        if let Ok(value) = serde_json::to_value(&self.session) {
+        if let Ok(value) = serde_json::to_value(&session) {
             state.info = gpui_component::dock::PanelInfo::panel(value);
         }
         state
