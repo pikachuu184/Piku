@@ -114,14 +114,14 @@ impl InspectorPanel {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(6.))
+                .rounded(cx.theme().radius)
                 .bg(cx.theme().muted)
                 .child(
                     img(entry.path.clone())
                         .max_w_full()
                         .max_h_full()
                         .object_fit(ObjectFit::Contain)
-                        .rounded(px(6.)),
+                        .rounded(cx.theme().radius),
                 )
                 .into_any_element()
         } else if let Some(text) = self.preview_text.clone() {
@@ -129,7 +129,7 @@ impl InspectorPanel {
                 .w_full()
                 .h(px(170.))
                 .p_2()
-                .rounded(px(6.))
+                .rounded(cx.theme().radius)
                 .bg(cx.theme().muted)
                 .font_family("monospace")
                 .text_xs()
@@ -146,7 +146,7 @@ impl InspectorPanel {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(6.))
+                .rounded(cx.theme().radius)
                 .bg(cx.theme().muted)
                 .child(crate::ui::components::piku_spinner(
                     gpui_component::Size::Small,
@@ -160,7 +160,7 @@ impl InspectorPanel {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(6.))
+                .rounded(cx.theme().radius)
                 .bg(cx.theme().muted)
                 .child(
                     category_icon(category)
@@ -224,7 +224,7 @@ impl InspectorPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.))
+                    .rounded(cx.theme().radius)
                     .bg(cx.theme().muted)
                     .child(
                         Icon::new(IconName::Copy)
@@ -280,7 +280,7 @@ impl InspectorPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.))
+                    .rounded(cx.theme().radius)
                     .bg(cx.theme().muted)
                     .child(
                         Icon::new(IconName::FolderOpen)

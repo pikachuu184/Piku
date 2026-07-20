@@ -40,12 +40,12 @@ pub fn drive_details(drive: &DriveInfo, cx: &App) -> Div {
             div()
                 .w_full()
                 .h(px(3.))
-                .rounded(px(6.))
+                .rounded(cx.theme().radius)
                 .bg(cx.theme().border)
                 .child(
                     div()
                         .h_full()
-                        .rounded(px(6.))
+                        .rounded(cx.theme().radius)
                         .bg(cx.theme().foreground)
                         .w(relative(fraction.clamp(0.0, 1.0))),
                 ),

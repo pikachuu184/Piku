@@ -102,7 +102,7 @@ impl ExplorerPanel {
             .px_2()
             .gap_2()
             .items_center()
-            .rounded(px(6.))
+            .rounded(cx.theme().radius)
             .cursor_pointer()
             .when(selected, |style| {
                 style

@@ -29,7 +29,7 @@ pub fn section(
                 .px_2()
                 .py_1()
                 .mx_1()
-                .rounded(px(6.))
+                .rounded(cx.theme().radius)
                 .cursor_pointer()
                 .hover(|style| style.bg(cx.theme().sidebar_accent))
                 .on_click(on_toggle)

@@ -61,7 +61,15 @@ impl WorkspaceStore {
             for file in ["layout.json", "navigation.json"] {
                 let flat = persistence::state_path(file);
                 if flat.exists() {
-                    let _ = fs::rename(&flat, dir.join(file));
+                    // Windows can refuse the rename with a sharing violation
+                    // if another process still holds the file (AV scan, a
+                    // previous instance mid-shutdown) — fall back to copy so
+                    // the workspace still inherits the old state.
+                    if fs::rename(&flat, dir.join(file)).is_err()
+                        && fs::copy(&flat, dir.join(file)).is_ok()
+                    {
+                        let _ = fs::remove_file(&flat);
+                    }
                 }
             }
             index.active_id = Some(meta.id.clone());

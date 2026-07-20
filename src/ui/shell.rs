@@ -75,24 +75,29 @@ impl Workspace {
         cx.on_app_quit({
             let dock_area = dock_area.clone();
             move |_, cx| {
+                // Write synchronously: a detached background task races
+                // process teardown and the save silently never lands.
                 let state = dock_area.read(cx).dump(cx);
                 let file = active_layout_file(cx);
-                cx.background_executor().spawn(async move {
-                    let _ = crate::state::persistence::save_json(&file, &state);
-                })
+                let _ = crate::state::persistence::save_json(&file, &state);
+                std::future::ready(())
             }
         })
         .detach();
 
         let title_bar = cx.new(|cx| PikuTitleBar::new(dock_area.downgrade(), window, cx));
 
-        Self {
+        let mut this = Self {
             title_bar,
-            dock_area,
+            dock_area: dock_area.clone(),
             last_layout: None,
             _save_task: None,
             _subscriptions: subscriptions,
-        }
+        };
+        // Schedule an initial save so the workspace's layout file exists even
+        // if the user never rearranges anything (no LayoutChanged fires).
+        this.save_layout_debounced(dock_area, window, cx);
+        this
     }
 
     pub fn dock_area(&self) -> &Entity<DockArea> {
@@ -381,7 +386,7 @@ impl Workspace {
                     let this = this.clone();
                     let id = id.clone();
                     let fallback = fallback.clone();
-                    let _ = this.update(cx, |this, cx| {
+                    this.update(cx, |this, cx| {
                         // Deleting the active workspace: switch away first.
                         this.switch_workspace(&fallback, window, cx);
                         let store = PikuState::global(cx).workspaces.clone();

@@ -99,7 +99,7 @@ impl NavPanel {
             .mx_1()
             .px_2()
             .py_1()
-            .rounded(px(6.))
+            .rounded(cx.theme().radius)
             .cursor_pointer()
             .text_sm()
             .text_color(cx.theme().sidebar_foreground)
@@ -258,7 +258,7 @@ impl Render for NavPanel {
                         .mx_1()
                         .px_2()
                         .py_1p5()
-                        .rounded(px(6.))
+                        .rounded(cx.theme().radius)
                         .cursor_pointer()
                         .hover(|style| style.bg(cx.theme().sidebar_accent))
                         .on_click(move |_, window, cx| {

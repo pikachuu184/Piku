@@ -54,7 +54,7 @@ pub(super) fn workspace_switcher(cx: &Context<NavPanel>) -> impl IntoElement {
                     let active_id = store.active_id().to_string();
                     // Most recently opened first.
                     let mut workspaces: Vec<_> = store.list().to_vec();
-                    workspaces.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+                    workspaces.sort_by_key(|w| std::cmp::Reverse(w.last_opened));
 
                     let mut menu = menu;
                     for workspace in workspaces {
