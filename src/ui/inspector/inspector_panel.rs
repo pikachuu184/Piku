@@ -62,9 +62,14 @@ impl InspectorPanel {
                 self.preview_text = None;
                 let load_path = path.clone();
                 let task = cx.background_executor().spawn(async move {
-                    let bytes = std::fs::read(&load_path).ok()?;
-                    let slice = &bytes[..bytes.len().min(4096)];
-                    Some(String::from_utf8_lossy(slice).into_owned())
+                    use std::io::Read as _;
+                    // Authorize the path and read at most 4 KiB — never pull a
+                    // multi-GB file into memory to preview its head.
+                    let load_path = crate::storage::local().guard().sanitize(&load_path).ok()?;
+                    let file = std::fs::File::open(&load_path).ok()?;
+                    let mut bytes = Vec::with_capacity(4096);
+                    file.take(4096).read_to_end(&mut bytes).ok()?;
+                    Some(String::from_utf8_lossy(&bytes).into_owned())
                 });
                 cx.spawn(async move |this, cx| {
                     let text = task.await;

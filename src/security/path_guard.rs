@@ -27,10 +27,19 @@ pub struct PathGuard {
     roots: Vec<PathBuf>,
 }
 
-const RESERVED: [&str; 22] = [
+const RESERVED: [&str; 24] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "CONIN$",
+    "CONOUT$",
 ];
+
+/// Whether a single path component collides with a reserved Windows device
+/// name (the check applies to the stem before the first `.`, per Win32 rules,
+/// so `CON.txt` is reserved too).
+pub fn is_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").to_uppercase();
+    RESERVED.contains(&stem.as_str())
+}
 
 impl PathGuard {
     /// Authorize all currently mounted local drive roots.
@@ -94,8 +103,7 @@ impl PathGuard {
                 }
                 Component::Normal(part) => {
                     let part_str = part.to_string_lossy();
-                    let stem = part_str.split('.').next().unwrap_or("").to_uppercase();
-                    if RESERVED.contains(&stem.as_str()) {
+                    if is_reserved_name(&part_str) {
                         return Err(PathGuardError::ReservedName(part_str.into_owned()));
                     }
                     normalized.push(part);
@@ -184,6 +192,28 @@ mod tests {
             g.sanitize(Path::new("C:\\folder\\CON.txt")),
             Err(PathGuardError::ReservedName(_))
         ));
+    }
+
+    #[test]
+    fn rejects_console_device_names() {
+        let g = guard();
+        assert!(matches!(
+            g.sanitize(Path::new("C:\\folder\\CONIN$")),
+            Err(PathGuardError::ReservedName(_))
+        ));
+        assert!(matches!(
+            g.sanitize(Path::new("C:\\folder\\conout$.txt")),
+            Err(PathGuardError::ReservedName(_))
+        ));
+    }
+
+    #[test]
+    fn reserved_name_helper() {
+        assert!(is_reserved_name("CON"));
+        assert!(is_reserved_name("con.txt"));
+        assert!(is_reserved_name("Conin$"));
+        assert!(!is_reserved_name("console"));
+        assert!(!is_reserved_name("com10"));
     }
 
     #[test]

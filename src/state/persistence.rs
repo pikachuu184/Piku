@@ -24,6 +24,9 @@ pub fn state_path(name: &str) -> PathBuf {
 /// crash can never leave a truncated state file.
 pub fn save_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<()> {
     let path = state_path(name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
     let tmp = path.with_extension("tmp");
     let json = serde_json::to_string_pretty(value)?;
     fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;

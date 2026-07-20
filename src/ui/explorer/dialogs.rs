@@ -11,25 +11,9 @@ use gpui_component::{
 };
 
 use crate::core::entry::FsEntry;
+use crate::security::file_name::validate_name;
 use crate::state::PikuState;
 use crate::ui::explorer::ExplorerPanel;
-
-/// Windows-invalid filename characters.
-const INVALID_CHARS: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
-
-fn validate_name(name: &str) -> Result<(), String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err("Name cannot be empty".into());
-    }
-    if trimmed.chars().any(|c| INVALID_CHARS.contains(&c)) {
-        return Err("Names cannot contain  < > : \" / \\ | ? *".into());
-    }
-    if trimmed.ends_with('.') || trimmed.ends_with(' ') {
-        return Err("Names cannot end with a dot or space".into());
-    }
-    Ok(())
-}
 
 /// Standard dialog footer: Cancel + primary action. Enter/Escape also work
 /// through the dialog's built-in key bindings.

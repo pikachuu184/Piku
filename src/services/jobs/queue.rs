@@ -11,6 +11,8 @@ use gpui::{Context, Window};
 use gpui_component::WindowExt as _;
 use gpui_component::notification::Notification;
 
+use crate::security::file_name::validate_name;
+use crate::security::path_guard::PathGuard;
 use crate::services::jobs::{Job, JobEvent, JobKind, JobStatus};
 use crate::storage::provider::StorageProvider;
 
@@ -69,8 +71,9 @@ impl JobQueue {
             format!("{} {} items", kind.label(), sources.len())
         };
         let provider = crate::storage::local_dyn();
+        let guard = crate::storage::local().guard().clone();
         self.spawn_job(kind, title, window, cx, move |tx, cancel| {
-            copy_work(provider, sources, dest_dir, is_move, tx, cancel)
+            copy_work(provider, guard, sources, dest_dir, is_move, tx, cancel)
         });
     }
 
@@ -114,6 +117,14 @@ impl JobQueue {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Defense in depth: dialogs validate too, but every rename that
+        // reaches the engine gets checked regardless of caller.
+        if let Some(name) = to.file_name().map(|n| n.to_string_lossy().into_owned())
+            && let Err(error) = validate_name(&name)
+        {
+            window.push_notification(Notification::error(error), cx);
+            return;
+        }
         let title = format!("Renaming “{}”", file_label(&from));
         let provider = crate::storage::local_dyn();
         self.spawn_job(JobKind::Rename, title, window, cx, move |tx, _cancel| {
@@ -131,6 +142,12 @@ impl JobQueue {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
+            && let Err(error) = validate_name(&name)
+        {
+            window.push_notification(Notification::error(error), cx);
+            return;
+        }
         let title = format!("Creating “{}”", file_label(&path));
         let provider = crate::storage::local_dyn();
         self.spawn_job(JobKind::NewFolder, title, window, cx, move |tx, _cancel| {
@@ -258,13 +275,38 @@ fn plural(count: usize) -> &'static str {
 
 fn copy_work(
     provider: Arc<dyn StorageProvider>,
+    guard: PathGuard,
     sources: Vec<PathBuf>,
     dest_dir: PathBuf,
     is_move: bool,
     tx: UnboundedSender<JobEvent>,
     cancel: Arc<AtomicBool>,
 ) {
-    // Refuse to copy a directory into itself or its own subtree.
+    // Authorize everything up front; the engine below never touches a path
+    // that has not passed the guard.
+    let dest_dir = match guard.sanitize(&dest_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = tx.unbounded_send(JobEvent::Finished(Err(error.to_string())));
+            return;
+        }
+    };
+    let sources: Vec<PathBuf> = {
+        let mut sanitized = Vec::with_capacity(sources.len());
+        for source in &sources {
+            match guard.sanitize(source) {
+                Ok(path) => sanitized.push(path),
+                Err(error) => {
+                    let _ = tx.unbounded_send(JobEvent::Finished(Err(error.to_string())));
+                    return;
+                }
+            }
+        }
+        sanitized
+    };
+
+    // Refuse to copy a directory into itself or its own subtree. Runs on the
+    // sanitized (normalized) paths so `dest\..\src` aliases cannot slip past.
     for source in &sources {
         if dest_dir.starts_with(source) {
             let _ = tx.unbounded_send(JobEvent::Finished(Err(format!(
@@ -280,7 +322,7 @@ fn copy_work(
     let mut total_bytes = 0u64;
     let mut total_items = 0usize;
     for source in &sources {
-        if scan(source, &mut total_bytes, &mut total_items, &cancel).is_err() {
+        if scan(&guard, source, &mut total_bytes, &mut total_items, &cancel).is_err() {
             let _ = tx.unbounded_send(JobEvent::Finished(Err("cancelled".into())));
             return;
         }
@@ -302,13 +344,14 @@ fn copy_work(
         let Some(name) = source.file_name() else {
             continue;
         };
-        let target = unique_destination(&dest_dir.join(name));
+        let target = unique_destination(&guard, &dest_dir.join(name));
 
         if is_move && same_volume(source, &dest_dir) {
+            // Stat before the rename — afterwards the source no longer exists.
+            let size = std::fs::symlink_metadata(source).map(|m| m.len()).unwrap_or(0);
             match provider.rename(source, &target) {
                 Ok(()) => {
                     moved_fast += 1;
-                    let size = std::fs::metadata(source).map(|m| m.len()).unwrap_or(0);
                     let _ = tx.unbounded_send(JobEvent::Progress {
                         delta_bytes: size,
                         delta_items: 1,
@@ -321,11 +364,11 @@ fn copy_work(
             }
         }
 
-        match copy_recursive(provider.as_ref(), source, &target, &tx, &cancel) {
+        match copy_recursive(provider.as_ref(), &guard, source, &target, &tx, &cancel) {
             Ok(items) => {
                 copied += items;
                 if is_move
-                    && let Err(error) = remove_recursive(provider.as_ref(), source) {
+                    && let Err(error) = remove_recursive(provider.as_ref(), &guard, source) {
                         result = Err(format!(
                             "Copied, but could not remove source “{}”: {error}",
                             file_label(source)
@@ -350,6 +393,7 @@ fn copy_work(
 }
 
 fn scan(
+    guard: &PathGuard,
     path: &Path,
     bytes: &mut u64,
     items: &mut usize,
@@ -358,6 +402,11 @@ fn scan(
     if cancel.load(Ordering::Relaxed) {
         return Err(());
     }
+    // Unauthorized nodes are skipped without counting — the copy pass skips
+    // them the same way, so totals stay honest.
+    if guard.sanitize(path).is_err() {
+        return Ok(());
+    }
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return Ok(());
     };
@@ -365,7 +414,7 @@ fn scan(
     if metadata.is_dir() && !metadata.is_symlink() {
         if let Ok(children) = std::fs::read_dir(path) {
             for child in children.flatten() {
-                scan(&child.path(), bytes, items, cancel)?;
+                scan(guard, &child.path(), bytes, items, cancel)?;
             }
         }
     } else if metadata.is_file() {
@@ -374,9 +423,12 @@ fn scan(
     Ok(())
 }
 
-/// Copy a file or directory tree. Symlinks are never traversed or copied.
+/// Copy a file or directory tree. Symlinks are never traversed or copied, and
+/// every node is re-authorized through the guard before it is touched —
+/// unauthorized children are skipped, mirroring the scan pass.
 fn copy_recursive(
     provider: &dyn StorageProvider,
+    guard: &PathGuard,
     source: &Path,
     target: &Path,
     tx: &UnboundedSender<JobEvent>,
@@ -384,6 +436,9 @@ fn copy_recursive(
 ) -> Result<usize, String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
+    }
+    if guard.sanitize(source).is_err() || guard.sanitize(target).is_err() {
+        return Ok(0);
     }
     let metadata =
         std::fs::symlink_metadata(source).map_err(|error| format!("{}: {error}", source.display()))?;
@@ -398,7 +453,10 @@ fn copy_recursive(
     }
 
     if metadata.is_dir() {
-        std::fs::create_dir_all(target)
+        // Routed through the provider (not raw create_dir_all) so directory
+        // creation gains the same sanitize + audit trail as every mutation.
+        provider
+            .create_dir(target)
             .map_err(|error| format!("creating {}: {error}", target.display()))?;
         let _ = tx.unbounded_send(JobEvent::Progress {
             delta_bytes: 0,
@@ -412,7 +470,7 @@ fn copy_recursive(
             let Some(name) = child_source.file_name() else {
                 continue;
             };
-            items += copy_recursive(provider, &child_source, &target.join(name), tx, cancel)?;
+            items += copy_recursive(provider, guard, &child_source, &target.join(name), tx, cancel)?;
         }
         return Ok(items);
     }
@@ -439,19 +497,32 @@ fn copy_recursive(
     Ok(1)
 }
 
-/// Bottom-up removal of a source tree after a verified move-copy.
-fn remove_recursive(provider: &dyn StorageProvider, path: &Path) -> anyhow::Result<()> {
+/// Bottom-up removal of a source tree after a verified move-copy. Every node
+/// is re-authorized before the traversal descends into it.
+fn remove_recursive(
+    provider: &dyn StorageProvider,
+    guard: &PathGuard,
+    path: &Path,
+) -> anyhow::Result<()> {
+    guard
+        .sanitize(path)
+        .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.is_dir() && !metadata.is_symlink() {
         for child in std::fs::read_dir(path)?.flatten() {
-            remove_recursive(provider, &child.path())?;
+            remove_recursive(provider, guard, &child.path())?;
         }
     }
     provider.remove_after_move(path)
 }
 
-/// Explorer-style collision handling: `name.txt` → `name (2).txt`.
-fn unique_destination(wanted: &Path) -> PathBuf {
+/// Explorer-style collision handling: `name.txt` → `name (2).txt`. The wanted
+/// path is authorized before any filesystem probe; on failure it is returned
+/// untouched so the caller's guarded operations reject it with a real error.
+fn unique_destination(guard: &PathGuard, wanted: &Path) -> PathBuf {
+    if guard.sanitize(wanted).is_err() {
+        return wanted.to_path_buf();
+    }
     if !wanted.exists() {
         return wanted.to_path_buf();
     }
