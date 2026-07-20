@@ -55,6 +55,9 @@ actions!(
         SortByType,
         FavoriteSelection,
         PinSelection,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
         ShowAbout,
     ]
 );
@@ -85,5 +88,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-a", SelectAll, explorer),
         KeyBinding::new("down", SelectNext, explorer),
         KeyBinding::new("up", SelectPrev, explorer),
+        KeyBinding::new("ctrl-=", ZoomIn, explorer),
+        KeyBinding::new("ctrl-shift-=", ZoomIn, explorer),
+        KeyBinding::new("ctrl--", ZoomOut, explorer),
+        KeyBinding::new("ctrl-0", ResetZoom, explorer),
     ]);
 }

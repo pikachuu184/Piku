@@ -34,11 +34,12 @@ impl ExplorerPanel {
         let entry = entry.clone();
         let selected = self.selected.contains(&ix);
         let name: SharedString = entry.name.clone().into();
+        let zoom = self.zoom();
 
         v_flex()
             .id(SharedString::from(format!("tile-{ix}")))
-            .w(px(104.))
-            .h(px(96.))
+            .w(px(104. * zoom))
+            .h(px(96. * zoom))
             .p_2()
             .gap_1()
             .items_center()
@@ -67,11 +68,11 @@ impl ExplorerPanel {
                     this.click_select(ix, event, window, cx);
                 }
             }))
-            .child(entry_icon(&entry, cx).size(px(34.)))
+            .child(entry_icon(&entry, cx).size(px(34. * zoom)))
             .child(
                 div()
                     .w_full()
-                    .text_xs()
+                    .text_size(px(12. * zoom))
                     .text_center()
                     .line_clamp(2)
                     .text_color(if entry.hidden {

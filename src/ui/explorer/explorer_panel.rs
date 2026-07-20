@@ -27,7 +27,7 @@ use crate::app::actions::{self as actions};
 use crate::core::entry::FsEntry;
 use crate::services::watcher::DirWatcher;
 use crate::state::PikuState;
-use crate::state::pane_state::{PaneSession, SortBy, ViewMode};
+use crate::state::pane_state::{PaneSession, SortBy, ViewMode, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP};
 use crate::ui::components::empty_state;
 
 pub struct ExplorerPanel {
@@ -62,7 +62,12 @@ impl ExplorerPanel {
         )
     }
 
-    pub fn from_session(session: PaneSession, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn from_session(
+        mut session: PaneSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        session.zoom = session.zoom.clamp(ZOOM_MIN, ZOOM_MAX);
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter…"));
 
         let mut subscriptions = Vec::new();
@@ -500,6 +505,27 @@ impl ExplorerPanel {
         self.apply_view(cx);
     }
 
+    // -- Zoom --------------------------------------------------------------
+
+    pub(super) fn zoom(&self) -> f32 {
+        self.session.zoom
+    }
+
+    fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        // Snap to the step grid so repeated ctrl+wheel ticks never drift.
+        let zoom = ((zoom / ZOOM_STEP).round() * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX);
+        if (zoom - self.session.zoom).abs() > f32::EPSILON {
+            self.session.zoom = zoom;
+            // Rides the dock layout save, which persists the pane session.
+            cx.emit(PanelEvent::LayoutChanged);
+            cx.notify();
+        }
+    }
+
+    fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
+        self.set_zoom(self.session.zoom + delta, cx);
+    }
+
     // -- Action handlers ---------------------------------------------------
 
     fn on_toggle_hidden(&mut self, _: &actions::ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
@@ -527,7 +553,11 @@ impl Render for ExplorerPanel {
                 .size_full()
                 .p_4()
                 .overflow_hidden()
-                .child(crate::ui::components::skeleton_rows(8, 30., cx))
+                .child(crate::ui::components::skeleton_rows(
+                    8,
+                    super::file_list::row_height(self.session.zoom),
+                    cx,
+                ))
                 .into_any_element()
         } else if self.entries.is_empty() {
             let filtered = !self.filter_input.read(cx).value().is_empty();
@@ -604,11 +634,29 @@ impl Render for ExplorerPanel {
                     PikuState::global(cx).nav.clone().update(cx, |nav, cx| nav.toggle_pinned(path, cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &actions::ZoomIn, _, cx| this.zoom_by(ZOOM_STEP, cx)))
+            .on_action(cx.listener(|this, _: &actions::ZoomOut, _, cx| this.zoom_by(-ZOOM_STEP, cx)))
+            .on_action(cx.listener(|this, _: &actions::ResetZoom, _, cx| this.set_zoom(1.0, cx)))
             .child(self.render_toolbar(window, cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
+                    .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                        if !event.modifiers.control {
+                            return;
+                        }
+                        let dy = match event.delta {
+                            gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                            gpui::ScrollDelta::Lines(delta) => delta.y,
+                        };
+                        if dy > 0.0 {
+                            this.zoom_by(ZOOM_STEP, cx);
+                        } else if dy < 0.0 {
+                            this.zoom_by(-ZOOM_STEP, cx);
+                        }
+                        cx.stop_propagation();
+                    }))
                     .context_menu({
                         let has_selection = !self.selected.is_empty();
                         let has_clipboard = !PikuState::global(cx).clipboard.read(cx).paths.is_empty();

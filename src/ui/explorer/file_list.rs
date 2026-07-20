@@ -14,7 +14,15 @@ use crate::core::format::{format_size, format_time};
 use crate::ui::components::entry_icon;
 use crate::ui::explorer::ExplorerPanel;
 
-pub(super) const ROW_HEIGHT: f32 = 30.;
+const BASE_ROW_HEIGHT: f32 = 30.;
+const BASE_SIZE_COL: f32 = 90.;
+const BASE_DATE_COL: f32 = 140.;
+
+/// List row height at the given zoom level (whole pixels so virtual-list
+/// offsets stay crisp).
+pub(super) fn row_height(zoom: f32) -> f32 {
+    (BASE_ROW_HEIGHT * zoom).round()
+}
 
 impl ExplorerPanel {
     pub(super) fn render_list(
@@ -22,13 +30,15 @@ impl ExplorerPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let zoom = self.zoom();
         let sizes: Rc<Vec<Size<gpui::Pixels>>> =
-            Rc::new(vec![size(px(100.), px(ROW_HEIGHT)); self.entries.len()]);
+            Rc::new(vec![size(px(100.), px(row_height(zoom))); self.entries.len()]);
 
         v_flex()
             .size_full()
             .child(
-                // Column headers.
+                // Column headers — widths must scale exactly like the rows so
+                // the columns stay aligned at every zoom level.
                 h_flex()
                     .px_3()
                     .py_1()
@@ -38,8 +48,20 @@ impl ExplorerPanel {
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(div().flex_1().min_w_0().child("Name"))
-                    .child(div().w(px(90.)).flex_none().text_right().child("Size"))
-                    .child(div().w(px(140.)).flex_none().text_right().child("Modified")),
+                    .child(
+                        div()
+                            .w(px(BASE_SIZE_COL * zoom))
+                            .flex_none()
+                            .text_right()
+                            .child("Size"),
+                    )
+                    .child(
+                        div()
+                            .w(px(BASE_DATE_COL * zoom))
+                            .flex_none()
+                            .text_right()
+                            .child("Modified"),
+                    ),
             )
             .child(
                 div().flex_1().min_h_0().px_1().child(
@@ -65,6 +87,7 @@ impl ExplorerPanel {
         let entry: FsEntry = entry.clone();
         let selected = self.selected.contains(&ix);
         let dimmed = entry.hidden;
+        let zoom = self.zoom();
 
         let size_text = if entry.is_dir() {
             "—".to_string()
@@ -75,7 +98,7 @@ impl ExplorerPanel {
         h_flex()
             .id(ix)
             .w_full()
-            .h(px(ROW_HEIGHT))
+            .h(px(row_height(zoom)))
             .px_2()
             .gap_2()
             .items_center()
@@ -104,13 +127,13 @@ impl ExplorerPanel {
                     this.click_select(ix, event, window, cx);
                 }
             }))
-            .child(entry_icon(&entry, cx).size(px(16.)))
+            .child(entry_icon(&entry, cx).size(px(16. * zoom)))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_sm()
+                    .text_size(px(13. * zoom))
                     .text_color(if dimmed {
                         cx.theme().muted_foreground
                     } else {
@@ -120,19 +143,19 @@ impl ExplorerPanel {
             )
             .child(
                 div()
-                    .w(px(90.))
+                    .w(px(BASE_SIZE_COL * zoom))
                     .flex_none()
                     .text_right()
-                    .text_xs()
+                    .text_size(px(12. * zoom))
                     .text_color(cx.theme().muted_foreground)
                     .child(size_text),
             )
             .child(
                 div()
-                    .w(px(140.))
+                    .w(px(BASE_DATE_COL * zoom))
                     .flex_none()
                     .text_right()
-                    .text_xs()
+                    .text_size(px(12. * zoom))
                     .text_color(cx.theme().muted_foreground)
                     .child(format_time(entry.modified)),
             )
