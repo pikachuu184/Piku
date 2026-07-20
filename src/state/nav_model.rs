@@ -1,4 +1,6 @@
 //! Cross-pane navigation model: favorites, pinned folders, and recents.
+//! Scoped to a workspace — each workspace persists its own copy under
+//! `workspaces/<id>/navigation.json`.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -6,24 +8,33 @@ use std::path::{Path, PathBuf};
 use gpui::Context;
 use serde::{Deserialize, Serialize};
 
-const FILE: &str = "navigation.json";
+use crate::state::workspaces::WorkspaceStore;
+
 const MAX_RECENTS: usize = 12;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NavModel {
+    /// Persistence target (relative to the data dir); set by `load_for`,
+    /// never serialized.
+    #[serde(skip)]
+    file: String,
     pub favorites: Vec<PathBuf>,
     pub pinned: Vec<PathBuf>,
     pub recents: VecDeque<PathBuf>,
 }
 
 impl NavModel {
-    pub fn load() -> Self {
-        crate::state::persistence::load_json(FILE).unwrap_or_default()
+    /// Load the navigation model belonging to the given workspace.
+    pub fn load_for(workspace_id: &str) -> Self {
+        let file = WorkspaceStore::nav_file(workspace_id);
+        let mut model: Self = crate::state::persistence::load_json(&file).unwrap_or_default();
+        model.file = file;
+        model
     }
 
-    fn save(&self) {
-        if let Err(error) = crate::state::persistence::save_json(FILE, self) {
+    pub fn save(&self) {
+        if let Err(error) = crate::state::persistence::save_json(&self.file, self) {
             tracing::warn!("failed to save navigation state: {error:#}");
         }
     }

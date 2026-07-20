@@ -5,6 +5,7 @@ pub mod shell;
 pub mod sidebar;
 pub mod statusbar;
 pub mod titlebar;
+pub mod workspace_dialogs;
 
 use gpui::{App, AppContext as _};
 use gpui_component::dock::{PanelInfo, register_panel};

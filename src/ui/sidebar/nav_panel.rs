@@ -38,8 +38,13 @@ impl NavPanel {
     pub const PANEL_NAME: &'static str = "PikuNav";
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let nav = PikuState::global(cx).nav.clone();
+        let (nav, workspaces) = {
+            let state = PikuState::global(cx);
+            (state.nav.clone(), state.workspaces.clone())
+        };
         let subscription = cx.observe(&nav, |_, _, cx| cx.notify());
+        // Re-render the switcher header on workspace switch/rename.
+        let workspaces_sub = cx.observe(&workspaces, |_, _, cx| cx.notify());
 
         // Drive enumeration touches the disk subsystem — keep it off the
         // render thread.
@@ -62,7 +67,7 @@ impl NavPanel {
             places: fs_service::known_places(),
             drives: Vec::new(),
             drives_loaded: false,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, workspaces_sub],
         }
     }
 
@@ -273,6 +278,7 @@ impl Render for NavPanel {
         v_flex()
             .size_full()
             .bg(cx.theme().sidebar)
+            .child(super::workspace_switcher::workspace_switcher(cx))
             .child(
                 div().id("nav-scroll").flex_1().min_h_0().overflow_y_scroll().child(
                     v_flex()

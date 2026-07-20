@@ -57,6 +57,7 @@ pub enum PikuIcon {
     FolderPlus,
     Columns2,
     Rows2,
+    Layers,
 }
 
 impl IconNamed for PikuIcon {
@@ -82,6 +83,7 @@ impl IconNamed for PikuIcon {
             Self::FolderPlus => "icons/piku/folder-plus.svg",
             Self::Columns2 => "icons/piku/columns-2.svg",
             Self::Rows2 => "icons/piku/rows-2.svg",
+            Self::Layers => "icons/piku/layers.svg",
         }
         .into()
     }

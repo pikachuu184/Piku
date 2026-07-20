@@ -20,6 +20,11 @@ pub struct TogglePinnedPath(pub PathBuf);
 #[action(namespace = piku, no_json)]
 pub struct RemoveRecentPath(pub PathBuf);
 
+/// Switch to the workspace with the given id (dispatched from the switcher).
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = piku, no_json)]
+pub struct SwitchWorkspace(pub String);
+
 /// Key context set on every explorer pane root, so file-management shortcuts
 /// never fight with text inputs.
 pub const EXPLORER_CONTEXT: &str = "Explorer";
@@ -58,6 +63,10 @@ actions!(
         ZoomIn,
         ZoomOut,
         ResetZoom,
+        CreateWorkspace,
+        RenameWorkspace,
+        DuplicateWorkspace,
+        DeleteWorkspace,
         ShowAbout,
     ]
 );
