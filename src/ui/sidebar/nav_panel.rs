@@ -20,6 +20,7 @@ use crate::app::actions::{RemoveRecentPath, ToggleFavoritePath, TogglePinnedPath
 use crate::app::assets::PikuIcon;
 use crate::services::fs_service::{self, DriveInfo, Place};
 use crate::state::PikuState;
+use crate::ui::components::skeleton_rows;
 use crate::ui::explorer::navigate_active;
 use crate::ui::sidebar::drive_list::drive_details;
 use crate::ui::sidebar::section::section;
@@ -29,6 +30,7 @@ pub struct NavPanel {
     collapsed: HashSet<&'static str>,
     places: Vec<Place>,
     drives: Vec<DriveInfo>,
+    drives_loaded: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -48,6 +50,7 @@ impl NavPanel {
                 .await;
             let _ = this.update(cx, |this: &mut NavPanel, cx| {
                 this.drives = drives;
+                this.drives_loaded = true;
                 cx.notify();
             });
         })
@@ -58,6 +61,7 @@ impl NavPanel {
             collapsed: HashSet::new(),
             places: fs_service::known_places(),
             drives: Vec::new(),
+            drives_loaded: false,
             _subscriptions: vec![subscription],
         }
     }
@@ -226,7 +230,17 @@ impl Render for NavPanel {
                 ))
         };
 
-        let drives_content = v_flex().gap_1().children(
+        let drives_content = if !self.drives_loaded {
+            // Drive enumeration is still running on the background executor.
+            v_flex().gap_1().child(
+                div()
+                    .mx_1()
+                    .px_2()
+                    .py_1p5()
+                    .child(skeleton_rows(3, 24., cx)),
+            )
+        } else {
+            v_flex().gap_1().children(
             self.drives
                 .iter()
                 .enumerate()
@@ -253,7 +267,8 @@ impl Render for NavPanel {
                         .child(drive_details(drive, cx))
                 })
                 .collect::<Vec<_>>(),
-        );
+            )
+        };
 
         v_flex()
             .size_full()

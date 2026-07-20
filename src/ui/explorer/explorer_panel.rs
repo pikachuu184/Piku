@@ -525,12 +525,9 @@ impl Render for ExplorerPanel {
         } else if self.loading && self.entries.is_empty() {
             div()
                 .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("Loading…")
+                .p_4()
+                .overflow_hidden()
+                .child(crate::ui::components::skeleton_rows(8, 30., cx))
                 .into_any_element()
         } else if self.entries.is_empty() {
             let filtered = !self.filter_input.read(cx).value().is_empty();

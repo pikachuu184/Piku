@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use gpui::{Context, IntoElement, ParentElement, Styled, Window, div, px};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, Size,
     breadcrumb::{Breadcrumb, BreadcrumbItem},
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -15,6 +15,7 @@ use gpui_component::{
 use crate::app::actions::{SortByModified, SortByName, SortBySize, SortByType};
 use crate::app::assets::PikuIcon;
 use crate::state::pane_state::{SortBy, ViewMode};
+use crate::ui::components::piku_spinner;
 use crate::ui::explorer::ExplorerPanel;
 
 impl ExplorerPanel {
@@ -87,12 +88,27 @@ impl ExplorerPanel {
                     .on_click(cx.listener(|this, _, window, cx| this.go_up(window, cx))),
             )
             .child(
-                Button::new("nav-refresh")
-                    .icon(PikuIcon::RefreshCw)
-                    .xsmall()
-                    .ghost()
-                    .tooltip("Refresh (F5)")
-                    .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
+                // During a silent refresh (watcher-triggered reload over an
+                // already-populated listing) the refresh button becomes a
+                // spinner of the same footprint — no layout shift.
+                if self.loading && !self.entries.is_empty() {
+                    div()
+                        .size(px(26.))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .child(piku_spinner(Size::XSmall, cx))
+                        .into_any_element()
+                } else {
+                    Button::new("nav-refresh")
+                        .icon(PikuIcon::RefreshCw)
+                        .xsmall()
+                        .ghost()
+                        .tooltip("Refresh (F5)")
+                        .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx)))
+                        .into_any_element()
+                },
             )
             .child(
                 div().flex_1().min_w_0().px_2().child(

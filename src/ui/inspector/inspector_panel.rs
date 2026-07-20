@@ -137,6 +137,22 @@ impl InspectorPanel {
                 .overflow_hidden()
                 .child(text)
                 .into_any_element()
+        } else if self.preview_for.as_ref() == Some(&entry.path) {
+            // Text preview still loading — same box the preview will occupy,
+            // so nothing jumps when the content arrives.
+            div()
+                .w_full()
+                .h(px(170.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .bg(cx.theme().muted)
+                .child(crate::ui::components::piku_spinner(
+                    gpui_component::Size::Small,
+                    cx,
+                ))
+                .into_any_element()
         } else {
             div()
                 .w_full()
