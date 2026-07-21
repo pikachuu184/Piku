@@ -5,8 +5,8 @@ use gpui::{Context, Window};
 use gpui_component::{Icon, IconName, menu::PopupMenu};
 
 use crate::app::actions::{
-    CopySelection, CutSelection, DeleteSelection, FavoriteSelection, NewFolder, OpenSelection,
-    PasteClipboard, PinSelection, RefreshPane, RenameSelection,
+    CopySelection, CutSelection, DeleteSelection, FavoriteSelection, NewFile, NewFolder,
+    OpenSelection, PasteClipboard, PinSelection, RefreshPane, RenameSelection,
 };
 use crate::app::assets::PikuIcon;
 
@@ -58,6 +58,11 @@ pub(super) fn build(
         "New folder",
         Icon::new(PikuIcon::FolderPlus),
         Box::new(NewFolder),
+    )
+    .menu_with_icon(
+        "New file",
+        Icon::new(PikuIcon::FilePlus),
+        Box::new(NewFile),
     )
     .menu_with_icon(
         "Refresh",

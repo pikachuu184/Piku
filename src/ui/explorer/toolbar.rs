@@ -2,10 +2,12 @@
 
 use std::path::PathBuf;
 
-use gpui::{Context, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui::{
+    Context, InteractiveElement as _, IntoElement, ParentElement,
+    StatefulInteractiveElement as _, Styled, Window, div, px,
+};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, Size,
-    breadcrumb::{Breadcrumb, BreadcrumbItem},
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::Input,
@@ -111,33 +113,53 @@ impl ExplorerPanel {
                 },
             )
             .child(
-                div().flex_1().min_w_0().px_2().child(
-                    Breadcrumb::new().children(segments.into_iter().enumerate().map(
-                        |(ix, (label, path))| {
-                            BreadcrumbItem::new(label)
-                                .disabled(ix == last_ix)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.navigate_to(path.clone(), window, cx);
-                                }))
-                        },
-                    )),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .child(self.render_breadcrumbs(segments, last_ix, cx)),
             )
             // Input size tiers across PIKU: Small (30px) for toolbar inputs,
             // Large (40px) for dialog inputs. Keep new inputs on one of these.
             .child(
                 div()
+                    .id("filter-wrap")
                     .w(px(220.))
                     .max_w(px(280.))
                     .flex_shrink(1.)
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Filter this folder (Ctrl+F)")
+                            .build(window, cx)
+                    })
                     .child(Input::new(&self.filter_input).small().cleanable(true)),
             )
             .child(
+                // Toggle recursive search: the text box then searches subfolders
+                // instead of filtering the current listing.
+                Button::new("search-toggle")
+                    .icon(IconName::Search)
+                    .xsmall()
+                    .ghost()
+                    .selected(self.is_deep_search())
+                    .tooltip("Search subfolders")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_deep_search(window, cx);
+                    })),
+            )
+            .child(
+                // The active sort field is spelled out so the control reads at
+                // a glance; the icon carries the direction.
                 Button::new("sort-menu")
                     .icon(if ascending {
                         IconName::SortAscending
                     } else {
                         IconName::SortDescending
+                    })
+                    .label(match sort {
+                        SortBy::Name => "Name",
+                        SortBy::Size => "Size",
+                        SortBy::Modified => "Modified",
+                        SortBy::Type => "Type",
                     })
                     .xsmall()
                     .ghost()
@@ -171,15 +193,101 @@ impl ExplorerPanel {
                     })),
             )
             .child(
+                Button::new("new-file")
+                    .icon(PikuIcon::FilePlus)
+                    .xsmall()
+                    .ghost()
+                    .tooltip("New file (Ctrl+N)")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.start_create(false, window, cx);
+                    })),
+            )
+            .child(
                 Button::new("new-folder")
                     .icon(PikuIcon::FolderPlus)
                     .xsmall()
                     .ghost()
                     .tooltip("New folder (Ctrl+Shift+N)")
                     .on_click(cx.listener(|this, _, window, cx| {
-                        super::dialogs::new_folder(this, window, cx);
+                        this.start_create(true, window, cx);
                     })),
             )
+    }
+
+    /// Custom breadcrumb row: icon + label per segment (the library's
+    /// `BreadcrumbItem` is label-only). Deep paths collapse to
+    /// `first › … › last three` so the filter input never overflows.
+    fn render_breadcrumbs(
+        &self,
+        segments: Vec<(String, PathBuf)>,
+        last_ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        // None marks the ellipsis gap in a collapsed deep path.
+        let visible: Vec<Option<(usize, String, PathBuf)>> = if segments.len() > 6 {
+            let mut items: Vec<Option<(usize, String, PathBuf)>> = Vec::with_capacity(5);
+            let mut iter = segments.into_iter().enumerate();
+            let first = iter.next().map(|(ix, (label, path))| Some((ix, label, path)));
+            items.extend(first);
+            items.push(None);
+            let rest: Vec<_> = iter.collect();
+            items.extend(
+                rest.into_iter()
+                    .skip(last_ix.saturating_sub(3))
+                    .map(|(ix, (label, path))| Some((ix, label, path))),
+            );
+            items
+        } else {
+            segments
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (label, path))| Some((ix, label, path)))
+                .collect()
+        };
+
+        let mut row = h_flex().items_center().gap_0p5().overflow_hidden();
+        let count = visible.len();
+        for (pos, item) in visible.into_iter().enumerate() {
+            match item {
+                Some((ix, label, path)) => {
+                    let is_last = ix == last_ix;
+                    row = row.child(
+                        Button::new(("crumb", ix))
+                            .icon(
+                                Icon::new(if ix == 0 {
+                                    IconName::HardDrive
+                                } else {
+                                    IconName::Folder
+                                })
+                                .size(px(13.)),
+                            )
+                            .label(label)
+                            .xsmall()
+                            .ghost()
+                            .disabled(is_last)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.navigate_to(path.clone(), window, cx);
+                            })),
+                    );
+                }
+                None => {
+                    row = row.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("…"),
+                    );
+                }
+            }
+            if pos + 1 < count {
+                row = row.child(
+                    Icon::new(IconName::ChevronRight)
+                        .size(px(12.))
+                        .text_color(cx.theme().muted_foreground),
+                );
+            }
+        }
+        row
     }
 
     pub(super) fn dispatch_toggle_view(&mut self, cx: &mut Context<Self>) {

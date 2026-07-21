@@ -1,0 +1,3 @@
+// Windows executable resources for PIKU. The numerically-lowest icon ID
+// becomes the application/taskbar icon that Explorer and the shell display.
+1 ICON "assets/branding/piku.ico"

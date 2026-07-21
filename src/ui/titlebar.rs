@@ -51,7 +51,14 @@ impl Render for PikuTitleBar {
             .unwrap_or((true, true));
 
         TitleBar::new()
-            .child(div().flex().items_center().pl_1().child(PikuLogo::new()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h_full()
+                    .pl_2()
+                    .child(PikuLogo::new().icon_size(px(20.))),
+            )
             .child(
                 h_flex()
                     .items_center()
@@ -74,7 +81,7 @@ impl Render for PikuTitleBar {
                             .icon(PikuIcon::Columns2)
                             .small()
                             .ghost()
-                            .tooltip("Split right (Ctrl+Shift+E)")
+                            .tooltip("Split right (Ctrl+\\)")
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(SplitRight), cx);
                             }),
@@ -84,7 +91,7 @@ impl Render for PikuTitleBar {
                             .icon(PikuIcon::Rows2)
                             .small()
                             .ghost()
-                            .tooltip("Split down (Ctrl+Shift+O)")
+                            .tooltip("Split down (Ctrl+Shift+\\)")
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(SplitDown), cx);
                             }),

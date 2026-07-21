@@ -1,17 +1,17 @@
 //! Left-dock navigation panel: places, favorites, pinned, recents, drives.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, px,
+    App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName,
+    ActiveTheme as _, Icon, IconName, WindowExt as _,
     dock::{Panel, PanelEvent},
     h_flex,
+    input::{InputEvent, InputState},
     menu::ContextMenuExt as _,
     v_flex,
 };
@@ -25,12 +25,24 @@ use crate::ui::explorer::navigate_active;
 use crate::ui::sidebar::drive_list::drive_details;
 use crate::ui::sidebar::section::section;
 
+/// Inline workspace name editor shown in the switcher header — creation and
+/// rename happen in place, no modal (same pattern as the explorer's inline
+/// file editing: Enter commits, Escape and blur cancel).
+pub(super) struct WsEdit {
+    /// True = creating a new workspace; false = renaming the active one.
+    create: bool,
+    /// The name before editing, so an unchanged rename is a silent no-op.
+    original: String,
+    pub(super) input: gpui::Entity<InputState>,
+    _subs: Vec<Subscription>,
+}
+
 pub struct NavPanel {
     focus_handle: FocusHandle,
-    collapsed: HashSet<&'static str>,
     places: Vec<Place>,
     drives: Vec<DriveInfo>,
     drives_loaded: bool,
+    pub(super) ws_edit: Option<WsEdit>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -38,13 +50,19 @@ impl NavPanel {
     pub const PANEL_NAME: &'static str = "PikuNav";
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (nav, workspaces) = {
+        let (nav, workspaces, drive_stats) = {
             let state = PikuState::global(cx);
-            (state.nav.clone(), state.workspaces.clone())
+            (
+                state.nav.clone(),
+                state.workspaces.clone(),
+                state.drive_stats.clone(),
+            )
         };
         let subscription = cx.observe(&nav, |_, _, cx| cx.notify());
         // Re-render the switcher header on workspace switch/rename.
         let workspaces_sub = cx.observe(&workspaces, |_, _, cx| cx.notify());
+        // Repaint drive bars as scan results stream in.
+        let drive_stats_sub = cx.observe(&drive_stats, |_, _, cx| cx.notify());
 
         // Drive enumeration touches the disk subsystem — keep it off the
         // render thread.
@@ -56,29 +74,149 @@ impl NavPanel {
             let _ = this.update(cx, |this: &mut NavPanel, cx| {
                 this.drives = drives;
                 this.drives_loaded = true;
+                // Drives are known — refresh any stale per-category usage
+                // stats in the background (silent, cached, sequential).
+                let mounts: Vec<PathBuf> = this.drives.iter().map(|d| d.mount.clone()).collect();
+                PikuState::global(cx).drive_stats.clone().update(cx, |store, cx| {
+                    store.ensure_scans(mounts, cx);
+                });
                 cx.notify();
             });
         })
         .detach();
 
+        // Register so the shell can start inline workspace edits from the
+        // global Create/Rename actions.
+        PikuState::global(cx).set_nav_panel(cx.entity().downgrade());
+
         Self {
             focus_handle: cx.focus_handle(),
-            collapsed: HashSet::new(),
             places: fs_service::known_places(),
             drives: Vec::new(),
             drives_loaded: false,
-            _subscriptions: vec![subscription, workspaces_sub],
+            ws_edit: None,
+            _subscriptions: vec![subscription, workspaces_sub, drive_stats_sub],
         }
     }
 
-    fn is_open(&self, id: &'static str) -> bool {
-        !self.collapsed.contains(id)
+    // -- Inline workspace editing -------------------------------------------
+
+    /// Open the inline editor in the switcher header. `create` picks between
+    /// creating a new workspace and renaming the active one.
+    pub fn start_workspace_edit(
+        &mut self,
+        create: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ws_edit.is_some() {
+            return;
+        }
+        let original = if create {
+            String::new()
+        } else {
+            PikuState::global(cx).workspaces.read(cx).active().name.clone()
+        };
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(original.clone())
+                .placeholder("Workspace name")
+        });
+        let mut subs = Vec::new();
+        subs.push(cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_workspace_edit(window, cx),
+                InputEvent::Blur => this.cancel_workspace_edit(cx),
+                _ => {}
+            },
+        ));
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.ws_edit = Some(WsEdit {
+            create,
+            original,
+            input,
+            _subs: subs,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn cancel_workspace_edit(&mut self, cx: &mut Context<Self>) {
+        if self.ws_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn commit_workspace_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.ws_edit.take() else {
+            return;
+        };
+        let name = edit.input.read(cx).value().trim().to_string();
+        if name.is_empty() || (!edit.create && name == edit.original) {
+            cx.notify();
+            return;
+        }
+
+        let store = PikuState::global(cx).workspaces.clone();
+        let result = if edit.create {
+            store.update(cx, |store, cx| {
+                let result = store.create(&name);
+                cx.notify();
+                result.map(Some)
+            })
+        } else {
+            let id = store.read(cx).active_id().to_string();
+            store.update(cx, |store, cx| {
+                let result = store.rename(&id, &name);
+                cx.notify();
+                result.map(|_| None)
+            })
+        };
+
+        match result {
+            // A freshly created workspace becomes active — the shell owns the
+            // switch logic, so route through the global action.
+            Ok(Some(new_id)) => {
+                window.dispatch_action(
+                    Box::new(crate::app::actions::SwitchWorkspace(new_id)),
+                    cx,
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                // Keep the editor open so the user can fix the name.
+                window.push_notification(crate::ui::toast::error(error), cx);
+                self.ws_edit = Some(edit);
+                return;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Escape closes the workspace editor (wired on the editor wrapper).
+    pub(super) fn on_ws_editor_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key == "escape" {
+            self.cancel_workspace_edit(cx);
+            window.focus(&self.focus_handle, cx);
+        }
+    }
+
+    /// Collapse state lives on the workspace's NavModel so each workspace
+    /// restores its own sidebar shape across restarts.
+    fn is_open(&self, id: &'static str, cx: &Context<Self>) -> bool {
+        !PikuState::global(cx).nav.read(cx).is_section_collapsed(id)
     }
 
     fn toggle(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        if !self.collapsed.remove(id) {
-            self.collapsed.insert(id);
-        }
+        PikuState::global(cx).nav.clone().update(cx, |nav, cx| {
+            nav.toggle_section(id, cx);
+        });
         cx.notify();
     }
 
@@ -92,6 +230,7 @@ impl NavPanel {
     ) -> impl IntoElement {
         let click_path = path.clone();
         let menu_path = path.clone();
+        let tooltip_text = path.display().to_string();
         h_flex()
             .id(id)
             .items_center()
@@ -110,6 +249,9 @@ impl NavPanel {
             })
             .on_click(move |_, window, cx| {
                 navigate_active(click_path.clone(), window, cx);
+            })
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tooltip_text.clone()).build(window, cx)
             })
             .child(icon.size(px(16.)).text_color(cx.theme().muted_foreground))
             .child(div().flex_1().min_w_0().truncate().child(label))
@@ -251,6 +393,18 @@ impl Render for NavPanel {
                 .enumerate()
                 .map(|(ix, drive)| {
                     let path = drive.mount.clone();
+                    let used = drive.total.saturating_sub(drive.available);
+                    let percent = if drive.total > 0 {
+                        used as f64 / drive.total as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    let summary = format!(
+                        "{} used of {} — {} free ({percent:.0}%)",
+                        crate::core::format::format_size(used),
+                        crate::core::format::format_size(drive.total),
+                        crate::core::format::format_size(drive.available),
+                    );
                     h_flex()
                         .id(SharedString::from(format!("drive-{ix}")))
                         .items_start()
@@ -264,12 +418,16 @@ impl Render for NavPanel {
                         .on_click(move |_, window, cx| {
                             navigate_active(path.clone(), window, cx);
                         })
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(summary.clone())
+                                .build(window, cx)
+                        })
                         .child(
                             Icon::new(IconName::HardDrive)
                                 .size(px(16.))
                                 .text_color(cx.theme().muted_foreground),
                         )
-                        .child(drive_details(drive, cx))
+                        .child(drive_details(ix, drive, cx))
                 })
                 .collect::<Vec<_>>(),
             )
@@ -278,7 +436,7 @@ impl Render for NavPanel {
         v_flex()
             .size_full()
             .bg(cx.theme().sidebar)
-            .child(super::workspace_switcher::workspace_switcher(cx))
+            .child(super::workspace_switcher::workspace_switcher(self, cx))
             .child(
                 div().id("nav-scroll").flex_1().min_h_0().overflow_y_scroll().child(
                     v_flex()
@@ -287,7 +445,7 @@ impl Render for NavPanel {
                         .child(section(
                             "sec-places",
                             "Places",
-                            self.is_open("places"),
+                            self.is_open("places", cx),
                             cx.listener(|this, _, _, cx| this.toggle("places", cx)),
                             places_content,
                             cx,
@@ -295,7 +453,7 @@ impl Render for NavPanel {
                         .child(section(
                             "sec-favorites",
                             "Favorites",
-                            self.is_open("favorites"),
+                            self.is_open("favorites", cx),
                             cx.listener(|this, _, _, cx| this.toggle("favorites", cx)),
                             favorites_content,
                             cx,
@@ -303,7 +461,7 @@ impl Render for NavPanel {
                         .child(section(
                             "sec-pinned",
                             "Pinned",
-                            self.is_open("pinned"),
+                            self.is_open("pinned", cx),
                             cx.listener(|this, _, _, cx| this.toggle("pinned", cx)),
                             pinned_content,
                             cx,
@@ -311,7 +469,7 @@ impl Render for NavPanel {
                         .child(section(
                             "sec-recents",
                             "Recents",
-                            self.is_open("recents"),
+                            self.is_open("recents", cx),
                             cx.listener(|this, _, _, cx| this.toggle("recents", cx)),
                             recents_content,
                             cx,
@@ -319,7 +477,7 @@ impl Render for NavPanel {
                         .child(section(
                             "sec-drives",
                             "Drives",
-                            self.is_open("drives"),
+                            self.is_open("drives", cx),
                             cx.listener(|this, _, _, cx| this.toggle("drives", cx)),
                             drives_content,
                             cx,

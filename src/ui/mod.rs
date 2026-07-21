@@ -1,11 +1,14 @@
 pub mod components;
 pub mod explorer;
 pub mod inspector;
+pub mod media;
 pub mod shell;
 pub mod sidebar;
 pub mod statusbar;
 pub mod titlebar;
-pub mod workspace_dialogs;
+pub mod toast;
+
+use std::path::PathBuf;
 
 use gpui::{App, AppContext as _};
 use gpui_component::dock::{PanelInfo, register_panel};
@@ -13,6 +16,7 @@ use gpui_component::dock::{PanelInfo, register_panel};
 use crate::state::pane_state::PaneSession;
 use crate::ui::explorer::ExplorerPanel;
 use crate::ui::inspector::InspectorPanel;
+use crate::ui::media::MediaPanel;
 use crate::ui::sidebar::NavPanel;
 
 /// Register every panel constructor so saved dock layouts can be restored.
@@ -23,6 +27,17 @@ pub fn register_panels(cx: &mut App) {
 
     register_panel(cx, InspectorPanel::PANEL_NAME, |_, _, _, window, cx| {
         Box::new(cx.new(|cx| InspectorPanel::new(window, cx)))
+    });
+
+    register_panel(cx, MediaPanel::PANEL_NAME, |_, _, info, window, cx| {
+        let path = match info {
+            PanelInfo::Panel(value) => serde_json::from_value::<PathBuf>(value.clone()).ok(),
+            _ => None,
+        };
+        Box::new(cx.new(|cx| match path {
+            Some(path) => MediaPanel::for_path(path, window, cx),
+            None => MediaPanel::new(window, cx),
+        }))
     });
 
     register_panel(cx, ExplorerPanel::PANEL_NAME, |_, _, info, window, cx| {

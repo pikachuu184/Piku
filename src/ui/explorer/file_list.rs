@@ -3,16 +3,17 @@
 use std::rc::Rc;
 
 use gpui::{
-    ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement,
-    Size, StatefulInteractiveElement as _, Styled, Window, div,
+    AppContext as _, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement, Size, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px, size,
 };
-use gpui_component::{ActiveTheme as _, h_flex, v_flex, v_virtual_list};
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex, v_virtual_list};
 
 use crate::core::entry::FsEntry;
 use crate::core::format::{format_size, format_time};
-use crate::ui::components::entry_icon;
+use crate::ui::components::entry_visual;
 use crate::ui::explorer::ExplorerPanel;
+use super::explorer_panel::{DragPreview, DraggedPaths};
 
 const BASE_ROW_HEIGHT: f32 = 30.;
 const BASE_SIZE_COL: f32 = 90.;
@@ -88,12 +89,32 @@ impl ExplorerPanel {
         let selected = self.selected.contains(&ix);
         let dimmed = entry.hidden;
         let zoom = self.zoom();
+        // In-place rename: this row's label becomes an editor and the row's
+        // own mouse handling is suspended until the edit ends.
+        let renaming = self.renaming_ix() == Some(ix);
+        let editor = if renaming {
+            self.inline_edit.as_ref().map(|edit| edit.input.clone())
+        } else {
+            None
+        };
 
         let size_text = if entry.is_dir() {
             "—".to_string()
         } else {
             format_size(entry.size)
         };
+
+        // Drag payload: the whole selection when this row is part of it, else
+        // just this row. A dir row is also a drop target (move/copy into it).
+        let drag_paths = self.drag_paths(ix);
+        let drag_label: gpui::SharedString = if drag_paths.len() > 1 {
+            format!("{} items", drag_paths.len()).into()
+        } else {
+            entry.name.clone().into()
+        };
+        let source_id = self.session_id();
+        let is_dir = entry.is_dir();
+        let dir_dest = entry.path.clone();
 
         h_flex()
             .id(ix)
@@ -104,32 +125,72 @@ impl ExplorerPanel {
             .items_center()
             .rounded(cx.theme().radius)
             .cursor_pointer()
-            .when(selected, |style| {
+            // While renaming, the row's active border/bg are suppressed so the
+            // editor's own rounded 6px chrome is the single focus ring.
+            .when(selected && !renaming, |style| {
                 style
                     .bg(cx.theme().list_active)
                     .border_1()
                     .border_color(cx.theme().list_active_border)
             })
-            .when(!selected, |style| {
+            .when(!selected && !renaming, |style| {
                 style.hover(|style| style.bg(cx.theme().list_hover))
             })
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, _, window, cx| {
-                    window.focus(&this.focus_handle, cx);
-                    this.select_only(ix, cx);
-                }),
-            )
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if event.click_count() >= 2 {
-                    this.open_entry(ix, window, cx);
-                } else {
-                    this.click_select(ix, event, window, cx);
-                }
-            }))
-            .child(entry_icon(&entry, cx).size(px(16. * zoom)))
-            .child(
-                div()
+            .when(!renaming, |row| {
+                row.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, window, cx| {
+                        window.focus(&this.focus_handle, cx);
+                        this.select_only(ix, cx);
+                    }),
+                )
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if event.click_count() >= 2 {
+                        this.open_or_preview_entry(ix, window, cx);
+                    } else {
+                        this.click_select(ix, event, window, cx);
+                    }
+                }))
+                .when(!drag_paths.is_empty(), |row| {
+                    row.on_drag(
+                        DraggedPaths {
+                            paths: drag_paths.clone(),
+                            source_id: source_id.clone(),
+                        },
+                        move |_, _, _, cx| cx.new(|_| DragPreview { label: drag_label.clone() }),
+                    )
+                })
+                // Only folders accept a drop (into that folder). Ctrl forces a
+                // copy; otherwise it's a move. External OS files always copy.
+                .when(is_dir, |row| {
+                    row.drag_over::<DraggedPaths>(|style, _, _, cx| {
+                        style.bg(cx.theme().drop_target)
+                    })
+                    .on_drop(cx.listener({
+                        let dest = dir_dest.clone();
+                        move |this, dragged: &DraggedPaths, window, cx| {
+                            let is_move = !window.modifiers().control;
+                            this.drop_into(dragged.paths.clone(), dest.clone(), is_move, window, cx);
+                        }
+                    }))
+                    .on_drop(cx.listener({
+                        let dest = dir_dest.clone();
+                        move |this, paths: &gpui::ExternalPaths, window, cx| {
+                            this.drop_external(paths.paths().to_vec(), dest.clone(), window, cx);
+                        }
+                    }))
+                })
+            })
+            .child(entry_visual(&entry, 16. * zoom, cx))
+            .child(match editor {
+                Some(input) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .rounded(cx.theme().radius)
+                    .on_key_down(cx.listener(ExplorerPanel::on_editor_key_down))
+                    .child(gpui_component::input::Input::new(&input).small())
+                    .into_any_element(),
+                None => div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -139,8 +200,9 @@ impl ExplorerPanel {
                     } else {
                         cx.theme().foreground
                     })
-                    .child(entry.name.clone()),
-            )
+                    .child(entry.name.clone())
+                    .into_any_element(),
+            })
             .child(
                 div()
                     .w(px(BASE_SIZE_COL * zoom))

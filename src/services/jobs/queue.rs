@@ -9,7 +9,6 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{Context, Window};
 use gpui_component::WindowExt as _;
-use gpui_component::notification::Notification;
 
 use crate::security::file_name::validate_name;
 use crate::security::path_guard::PathGuard;
@@ -122,7 +121,7 @@ impl JobQueue {
         if let Some(name) = to.file_name().map(|n| n.to_string_lossy().into_owned())
             && let Err(error) = validate_name(&name)
         {
-            window.push_notification(Notification::error(error), cx);
+            window.push_notification(crate::ui::toast::error(error), cx);
             return;
         }
         let title = format!("Renaming “{}”", file_label(&from));
@@ -145,7 +144,7 @@ impl JobQueue {
         if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
             && let Err(error) = validate_name(&name)
         {
-            window.push_notification(Notification::error(error), cx);
+            window.push_notification(crate::ui::toast::error(error), cx);
             return;
         }
         let title = format!("Creating “{}”", file_label(&path));
@@ -153,6 +152,29 @@ impl JobQueue {
         self.spawn_job(JobKind::NewFolder, title, window, cx, move |tx, _cancel| {
             let result = provider
                 .create_dir(&path)
+                .map(|_| format!("Created “{}”", file_label(&path)))
+                .map_err(|error| error.to_string());
+            let _ = tx.unbounded_send(JobEvent::Finished(result));
+        });
+    }
+
+    pub fn submit_new_file(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
+            && let Err(error) = validate_name(&name)
+        {
+            window.push_notification(crate::ui::toast::error(error), cx);
+            return;
+        }
+        let title = format!("Creating “{}”", file_label(&path));
+        let provider = crate::storage::local_dyn();
+        self.spawn_job(JobKind::NewFile, title, window, cx, move |tx, _cancel| {
+            let result = provider
+                .create_file(&path)
                 .map(|_| format!("Created “{}”", file_label(&path)))
                 .map_err(|error| error.to_string());
             let _ = tx.unbounded_send(JobEvent::Finished(result));
@@ -227,15 +249,15 @@ impl JobQueue {
             JobEvent::Finished(result) => match result {
                 Ok(message) => {
                     job.status = JobStatus::Done;
-                    window.push_notification(Notification::success(message), cx);
+                    window.push_notification(crate::ui::toast::success(message), cx);
                 }
                 Err(error) => {
                     if error == "cancelled" {
                         job.status = JobStatus::Cancelled;
-                        window.push_notification(Notification::info("Operation cancelled"), cx);
+                        window.push_notification(crate::ui::toast::info("Operation cancelled"), cx);
                     } else {
                         job.status = JobStatus::Failed(error.clone());
-                        window.push_notification(Notification::error(error), cx);
+                        window.push_notification(crate::ui::toast::error(error), cx);
                     }
                 }
             },

@@ -2,6 +2,7 @@
 
 mod app;
 mod core;
+mod preview;
 mod security;
 mod services;
 mod state;

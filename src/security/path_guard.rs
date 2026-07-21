@@ -85,12 +85,20 @@ impl PathGuard {
         for component in raw.components() {
             match component {
                 Component::Prefix(prefix) => {
+                    has_prefix = true;
                     match prefix.kind() {
-                        Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {}
+                        Prefix::Disk(_) => normalized.push(component.as_os_str()),
+                        // `fs::canonicalize` returns extended-length verbatim
+                        // paths on Windows (`\\?\C:\…`). Collapse the prefix
+                        // to the plain disk form so root containment, display,
+                        // and downstream consumers all see one spelling.
+                        // (Verbatim *UNC* prefixes are rejected below — they
+                        // cannot be safely simplified.)
+                        Prefix::VerbatimDisk(letter) => {
+                            normalized.push(format!("{}:", letter as char));
+                        }
                         _ => return Err(PathGuardError::UnauthorizedPrefix),
                     }
-                    has_prefix = true;
-                    normalized.push(component.as_os_str());
                 }
                 Component::RootDir => normalized.push(component.as_os_str()),
                 Component::CurDir => {}
@@ -214,6 +222,26 @@ mod tests {
         assert!(is_reserved_name("Conin$"));
         assert!(!is_reserved_name("console"));
         assert!(!is_reserved_name("com10"));
+    }
+
+    #[test]
+    fn normalizes_verbatim_disk_prefix() {
+        let g = guard();
+        // What `fs::canonicalize` hands back on Windows must both pass the
+        // root check and come out in plain-disk spelling.
+        let p = g
+            .sanitize(Path::new("\\\\?\\C:\\Users\\demo\\file.txt"))
+            .unwrap();
+        assert_eq!(p, PathBuf::from("C:\\Users\\demo\\file.txt"));
+    }
+
+    #[test]
+    fn rejects_verbatim_unc() {
+        let g = guard();
+        assert!(matches!(
+            g.sanitize(Path::new("\\\\?\\UNC\\server\\share\\x")),
+            Err(PathGuardError::UnauthorizedPrefix)
+        ));
     }
 
     #[test]

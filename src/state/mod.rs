@@ -10,11 +10,15 @@ use std::path::PathBuf;
 use gpui::{App, AppContext as _, Entity, Global, WeakEntity};
 
 use crate::core::entry::FsEntry;
+use crate::services::audio_player::AudioPlayer;
+use crate::services::drive_scan::DriveStatsStore;
 use crate::services::jobs::JobQueue;
+use crate::services::thumbnails::ThumbnailCache;
 use crate::state::nav_model::NavModel;
 use crate::state::settings::Settings;
 use crate::state::workspaces::WorkspaceStore;
 use crate::ui::explorer::ExplorerPanel;
+use crate::ui::sidebar::NavPanel;
 
 /// What the active pane currently has selected; the inspector and status bar
 /// observe this entity.
@@ -39,7 +43,11 @@ pub struct PikuState {
     pub jobs: Entity<JobQueue>,
     pub clipboard: Entity<FileClipboard>,
     pub selection: Entity<SelectionCtx>,
+    pub drive_stats: Entity<DriveStatsStore>,
+    pub thumbnails: Entity<ThumbnailCache>,
+    pub audio: Entity<AudioPlayer>,
     active_explorer: RefCell<Option<WeakEntity<ExplorerPanel>>>,
+    nav_panel: RefCell<Option<WeakEntity<NavPanel>>>,
 }
 
 impl Global for PikuState {}
@@ -54,6 +62,9 @@ impl PikuState {
         let jobs = cx.new(|_| JobQueue::new());
         let clipboard = cx.new(|_| FileClipboard::default());
         let selection = cx.new(|_| SelectionCtx::default());
+        let drive_stats = cx.new(|_| DriveStatsStore::load());
+        let thumbnails = cx.new(|_| ThumbnailCache::default());
+        let audio = cx.new(|_| AudioPlayer::new());
         cx.set_global(Self {
             settings,
             workspaces,
@@ -61,7 +72,11 @@ impl PikuState {
             jobs,
             clipboard,
             selection,
+            drive_stats,
+            thumbnails,
+            audio,
             active_explorer: RefCell::new(None),
+            nav_panel: RefCell::new(None),
         });
     }
 
@@ -75,5 +90,13 @@ impl PikuState {
 
     pub fn active_explorer(&self) -> Option<WeakEntity<ExplorerPanel>> {
         self.active_explorer.borrow().clone()
+    }
+
+    pub fn set_nav_panel(&self, panel: WeakEntity<NavPanel>) {
+        *self.nav_panel.borrow_mut() = Some(panel);
+    }
+
+    pub fn nav_panel(&self) -> Option<WeakEntity<NavPanel>> {
+        self.nav_panel.borrow().clone()
     }
 }

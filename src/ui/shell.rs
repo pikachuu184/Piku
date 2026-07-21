@@ -1,6 +1,7 @@
 //! The workspace shell: title bar, three-region dock area, status bar.
 //! Layout is persisted as a logical dock graph and restored at startup.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,14 +11,13 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Placement, Root, WindowExt as _,
-    dock::{DockArea, DockAreaState, DockEvent, DockItem, DockPlacement},
-    notification::Notification,
+    dock::{DockArea, DockAreaState, DockEvent, DockItem, DockPlacement, PanelInfo, PanelState},
 };
 
 use crate::app::actions::{
-    CreateWorkspace, DeleteWorkspace, DuplicateWorkspace, NewTab, RemoveRecentPath,
-    RenameWorkspace, ShowAbout, SplitDown, SplitRight, SwitchWorkspace, ToggleFavoritePath,
-    ToggleLeftDock, TogglePinnedPath, ToggleRightDock,
+    CreateWorkspace, DeleteWorkspace, DuplicateTab, DuplicateWorkspace, NewTab, OpenMediaPanel,
+    PinTab, RemoveRecentPath, RenameWorkspace, RevealPreview, ShowAbout, SplitDown, SplitRight,
+    SwitchWorkspace, ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath, ToggleRightDock,
 };
 use crate::state::PikuState;
 use crate::state::nav_model::NavModel;
@@ -39,6 +39,7 @@ fn active_layout_file(cx: &App) -> String {
 pub struct Workspace {
     title_bar: Entity<PikuTitleBar>,
     dock_area: Entity<DockArea>,
+    media_bar: Entity<crate::ui::media::MediaBar>,
     last_layout: Option<DockAreaState>,
     _save_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -86,10 +87,12 @@ impl Workspace {
         .detach();
 
         let title_bar = cx.new(|cx| PikuTitleBar::new(dock_area.downgrade(), window, cx));
+        let media_bar = cx.new(crate::ui::media::MediaBar::new);
 
         let mut this = Self {
             title_bar,
             dock_area: dock_area.clone(),
+            media_bar,
             last_layout: None,
             _save_task: None,
             _subscriptions: subscriptions,
@@ -111,9 +114,21 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        let state: DockAreaState = crate::state::persistence::load_json(&active_layout_file(cx))?;
+        let mut state: DockAreaState =
+            crate::state::persistence::load_json(&active_layout_file(cx))?;
         if state.version != Some(DOCK_VERSION) {
             anyhow::bail!("layout version changed");
+        }
+        // The center root must always be a StackPanel: TabPanel::split_panel
+        // silently no-ops when a TabPanel has no parent stack, which is what
+        // broke splitting on layouts saved with a bare-TabPanel center.
+        if state.center.panel_name != "StackPanel" {
+            let child = std::mem::take(&mut state.center);
+            state.center = PanelState {
+                panel_name: "StackPanel".into(),
+                children: vec![child],
+                info: PanelInfo::stack(Vec::new(), gpui::Axis::Horizontal),
+            };
         }
         dock_area.update(cx, |dock_area, cx| {
             dock_area.load(state, window, cx)?;
@@ -141,7 +156,10 @@ impl Workspace {
 
         let home = crate::services::fs_service::home_dir();
         let explorer = cx.new(|cx| ExplorerPanel::from_session(PaneSession::at(home), window, cx));
-        let center = DockItem::tabs(vec![Arc::new(explorer)], dock_area, window, cx);
+        let tabs = DockItem::tabs(vec![Arc::new(explorer)], dock_area, window, cx);
+        // Wrap in a StackPanel so both split directions work from the first
+        // pane (see the invariant note in `load_layout`).
+        let center = DockItem::split(gpui::Axis::Horizontal, vec![tabs], dock_area, window, cx);
 
         let nav = cx.new(|cx| NavPanel::new(window, cx));
         let left = DockItem::tab(nav, dock_area, window, cx);
@@ -202,7 +220,7 @@ impl Workspace {
         PikuState::global(cx)
             .active_explorer()
             .and_then(|weak| weak.upgrade())
-            .map(|panel| PaneSession::at(panel.read(cx).cwd().clone()))
+            .map(|panel| panel.read(cx).new_tab_session())
             .unwrap_or_else(|| PaneSession::at(crate::services::fs_service::home_dir()))
     }
 
@@ -212,6 +230,40 @@ impl Workspace {
         self.dock_area.update(cx, |dock_area, cx| {
             dock_area.add_panel(Arc::new(panel), DockPlacement::Center, None, window, cx);
         });
+    }
+
+    /// Open (or add) a dockable media panel for `path` as a center tab. From
+    /// there the user can drag/split/tab it like any other panel.
+    fn open_media_panel(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let panel = cx.new(|cx| crate::ui::media::MediaPanel::for_path(path, window, cx));
+        self.dock_area.update(cx, |dock_area, cx| {
+            dock_area.add_panel(Arc::new(panel), DockPlacement::Center, None, window, cx);
+        });
+    }
+
+    /// Duplicate the active tab into a new tab carrying its full session
+    /// (folder, history, sort/view/zoom, filter, search, selection) but an
+    /// independent identity. Falls back to a plain new tab if none is active.
+    fn on_duplicate_tab(&mut self, _: &DuplicateTab, window: &mut Window, cx: &mut Context<Self>) {
+        let session = PikuState::global(cx)
+            .active_explorer()
+            .and_then(|weak| weak.upgrade())
+            .map(|panel| panel.read(cx).duplicate_session())
+            .unwrap_or_else(|| self.active_session(cx));
+        let panel = cx.new(|cx| ExplorerPanel::from_session(session, window, cx));
+        self.dock_area.update(cx, |dock_area, cx| {
+            dock_area.add_panel(Arc::new(panel), DockPlacement::Center, None, window, cx);
+        });
+    }
+
+    /// Toggle the active tab's pinned state (from the tab dropdown menu).
+    fn on_pin_tab(&mut self, _: &PinTab, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = PikuState::global(cx)
+            .active_explorer()
+            .and_then(|weak| weak.upgrade())
+        {
+            panel.update(cx, |panel, cx| panel.toggle_pin(cx));
+        }
     }
 
     fn split(&mut self, placement: Placement, window: &mut Window, cx: &mut Context<Self>) {
@@ -293,49 +345,20 @@ impl Workspace {
         cx.notify();
     }
 
-    fn on_create_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let this = cx.entity();
-        crate::ui::workspace_dialogs::prompt_workspace_name(
-            "New workspace",
-            "Create",
-            String::new(),
-            move |name, window, cx| {
-                let store = PikuState::global(cx).workspaces.clone();
-                let created = store.update(cx, |store, _| store.create(&name));
-                match created {
-                    Ok(id) => {
-                        this.update(cx, |this, cx| this.switch_workspace(&id, window, cx));
-                        Ok(())
-                    }
-                    Err(error) => Err(error),
-                }
-            },
-            window,
-            cx,
-        );
-    }
-
-    fn on_rename_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let store = PikuState::global(cx).workspaces.clone();
-        let (id, current_name) = {
-            let active = store.read(cx).active();
-            (active.id.clone(), active.name.clone())
-        };
-        crate::ui::workspace_dialogs::prompt_workspace_name(
-            "Rename workspace",
-            "Rename",
-            current_name,
-            move |name, _, cx| {
-                let store = PikuState::global(cx).workspaces.clone();
-                store.update(cx, |store, cx| {
-                    let result = store.rename(&id, &name);
-                    cx.notify();
-                    result
-                })
-            },
-            window,
-            cx,
-        );
+    /// Create/rename happen inline in the workspace switcher header — no
+    /// modal. The nav panel owns the editor; the shell just starts it.
+    fn start_workspace_edit(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The switcher lives in the left dock: make sure it is visible.
+        self.dock_area.update(cx, |dock_area, cx| {
+            if !dock_area.is_dock_open(DockPlacement::Left, cx) {
+                dock_area.toggle_dock(DockPlacement::Left, window, cx);
+            }
+        });
+        if let Some(panel) = PikuState::global(cx).nav_panel().and_then(|weak| weak.upgrade()) {
+            panel.update(cx, |panel, cx| {
+                panel.start_workspace_edit(create, window, cx);
+            });
+        }
     }
 
     fn on_duplicate_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -350,7 +373,7 @@ impl Workspace {
         });
         match duplicated {
             Ok(new_id) => self.switch_workspace(&new_id, window, cx),
-            Err(error) => window.push_notification(Notification::error(error), cx),
+            Err(error) => window.push_notification(crate::ui::toast::error(error), cx),
         }
     }
 
@@ -366,7 +389,7 @@ impl Workspace {
             )
         };
         let Some(fallback) = fallback else {
-            window.push_notification(Notification::info("Cannot delete the last workspace"), cx);
+            window.push_notification(crate::ui::toast::info("Cannot delete the last workspace"), cx);
             return;
         };
 
@@ -396,7 +419,7 @@ impl Workspace {
                             result
                         });
                         if let Err(error) = result {
-                            window.push_notification(Notification::error(error), cx);
+                            window.push_notification(crate::ui::toast::error(error), cx);
                         }
                     });
                     true
@@ -432,6 +455,8 @@ impl Render for Workspace {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_duplicate_tab))
+            .on_action(cx.listener(Self::on_pin_tab))
             .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
                 this.split(Placement::Right, window, cx);
             }))
@@ -448,16 +473,28 @@ impl Render for Workspace {
                     dock_area.toggle_dock(DockPlacement::Right, window, cx);
                 });
             }))
+            // Double-clicking a previewable file reveals (never hides) the
+            // inspector dock so the preview is visible immediately.
+            .on_action(cx.listener(|this, _: &RevealPreview, window, cx| {
+                this.dock_area.update(cx, |dock_area, cx| {
+                    if !dock_area.is_dock_open(DockPlacement::Right, cx) {
+                        dock_area.toggle_dock(DockPlacement::Right, window, cx);
+                    }
+                });
+            }))
+            .on_action(cx.listener(|this, action: &OpenMediaPanel, window, cx| {
+                this.open_media_panel(action.0.clone(), window, cx);
+            }))
             .on_action(cx.listener(Self::on_show_about))
             .on_action(cx.listener(|this, action: &SwitchWorkspace, window, cx| {
                 let id = action.0.clone();
                 this.switch_workspace(&id, window, cx);
             }))
             .on_action(cx.listener(|this, _: &CreateWorkspace, window, cx| {
-                this.on_create_workspace(window, cx);
+                this.start_workspace_edit(true, window, cx);
             }))
             .on_action(cx.listener(|this, _: &RenameWorkspace, window, cx| {
-                this.on_rename_workspace(window, cx);
+                this.start_workspace_edit(false, window, cx);
             }))
             .on_action(cx.listener(|this, _: &DuplicateWorkspace, window, cx| {
                 this.on_duplicate_workspace(window, cx);
@@ -488,6 +525,7 @@ impl Render for Workspace {
             }))
             .child(self.title_bar.clone())
             .child(div().flex_1().min_h_0().child(self.dock_area.clone()))
+            .child(self.media_bar.clone())
             .child(crate::ui::statusbar::render_status_bar(self, cx))
             .children(sheet_layer)
             .children(dialog_layer)

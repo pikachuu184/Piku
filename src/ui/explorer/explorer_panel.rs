@@ -2,7 +2,9 @@
 //! directory, history, listing, selection, filter, sort, and watcher.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -12,25 +14,78 @@ use gpui::{
     Subscription, WeakEntity, Window, div,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, VirtualListScrollHandle, WindowExt as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _, VirtualListScrollHandle, WindowExt as _,
     dock::{Panel, PanelEvent, PanelState, TabPanel},
-    input::{InputEvent, InputState},
-    menu::ContextMenuExt as _,
-    notification::Notification,
+    h_flex,
+    input::{Input, InputEvent, InputState},
+    menu::{ContextMenuExt as _, PopupMenu},
     v_flex,
 };
 use gpui::ScrollStrategy;
 
+use crate::services::search::{self, SearchUpdate};
+
 use crate::storage::provider::StorageProvider as _;
 
 use crate::app::actions::{self as actions};
+use crate::app::assets::PikuIcon;
 use crate::core::entry::FsEntry;
+use crate::security::file_name::validate_name;
 use crate::services::watcher::DirWatcher;
 use crate::state::PikuState;
 use crate::state::pane_state::{
     MAX_HISTORY, PaneSession, SortBy, ViewMode, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP,
 };
 use crate::ui::components::empty_state;
+
+/// What an open inline editor is doing. Rename anchors to a row; create is a
+/// pinned editor row above the listing (no modal dialogs — VS Code style).
+pub(super) enum InlineEditKind {
+    Rename { ix: usize, path: PathBuf },
+    Create { directory: bool },
+}
+
+pub(super) struct InlineEdit {
+    pub(super) kind: InlineEditKind,
+    pub(super) input: gpui::Entity<InputState>,
+    _subs: Vec<Subscription>,
+}
+
+/// The payload carried while dragging files. A plain `'static` value (gpui's
+/// drag/drop is type-keyed on it); the preview view is built separately. The
+/// source tab id lets a drop target recognize a same-tab no-op.
+#[derive(Clone)]
+pub(super) struct DraggedPaths {
+    pub(super) paths: Vec<PathBuf>,
+    pub(super) source_id: String,
+}
+
+/// The little chip shown under the cursor while dragging files.
+pub(super) struct DragPreview {
+    pub(super) label: SharedString,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .items_center()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .text_color(cx.theme().popover_foreground)
+            .text_xs()
+            .child(
+                Icon::new(IconName::File)
+                    .size(gpui::px(12.))
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(self.label.clone())
+    }
+}
 
 pub struct ExplorerPanel {
     pub(super) focus_handle: FocusHandle,
@@ -42,12 +97,27 @@ pub struct ExplorerPanel {
     pub(super) back_stack: Vec<PathBuf>,
     pub(super) fwd_stack: Vec<PathBuf>,
     pub(super) filter_input: gpui::Entity<InputState>,
+    pub(super) inline_edit: Option<InlineEdit>,
     pub(super) loading: bool,
     pub(super) error: Option<String>,
     generation: u64,
     watcher: Option<DirWatcher>,
     pub(super) scroll: VirtualListScrollHandle,
     pub(super) tab_panel: Option<WeakEntity<TabPanel>>,
+    /// True while showing recursive-search results instead of the folder
+    /// listing. In this mode `entries` holds the accumulated matches.
+    pub(super) searching: bool,
+    /// Whether the current search finished (vs. still streaming).
+    pub(super) search_complete: bool,
+    /// Cancels the in-flight search worker when a new one starts.
+    search_cancel: Arc<AtomicBool>,
+    /// Bumped per search so late streamed results from a superseded search are
+    /// ignored.
+    search_gen: u64,
+    /// Selection paths to restore after the first listing loads (session restore).
+    pending_selection: Vec<PathBuf>,
+    /// Row to scroll into view after restore (best-effort).
+    restore_scroll: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -70,6 +140,9 @@ impl ExplorerPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         session.zoom = session.zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+        if session.id.is_empty() {
+            session.id = crate::state::pane_state::new_tab_id();
+        }
 
         // Restored paths are re-authorized and must still exist; anything
         // that fails is silently dropped. The stacks live on the panel — the
@@ -84,7 +157,27 @@ impl ExplorerPanel {
             session.cwd = crate::services::fs_service::home_dir();
         }
 
-        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter…"));
+        // Selected paths to restore once the first listing lands. Re-authorize
+        // each; anything that no longer resolves is dropped.
+        let pending_selection: Vec<PathBuf> = std::mem::take(&mut session.selection)
+            .iter()
+            .filter_map(|p| guard.sanitize(p).ok())
+            .filter(|p| p.exists())
+            .collect();
+        let restore_scroll = session.scroll_first;
+
+        // Seed the text box from whichever query the session persisted for its
+        // current mode.
+        let (initial_text, placeholder) = if session.search_deep {
+            (session.search_query.clone(), "Search subfolders…")
+        } else {
+            (session.filter.clone(), "Filter…")
+        };
+        let filter_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .default_value(initial_text)
+        });
 
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(
@@ -92,7 +185,7 @@ impl ExplorerPanel {
             window,
             |this: &mut Self, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.apply_view(cx);
+                    this.on_query_changed(cx);
                 }
             },
         ));
@@ -101,6 +194,11 @@ impl ExplorerPanel {
         subscriptions.push(cx.observe_in(&settings, window, |this, _, window, cx| {
             this.reload(window, cx);
         }));
+
+        // Re-render when a thumbnail finishes decoding so the freshly cached
+        // image replaces its placeholder glyph.
+        let thumbnails = PikuState::global(cx).thumbnails.clone();
+        subscriptions.push(cx.observe(&thumbnails, |_, _, cx| cx.notify()));
 
         let mut this = Self {
             focus_handle: cx.focus_handle(),
@@ -112,15 +210,28 @@ impl ExplorerPanel {
             back_stack,
             fwd_stack,
             filter_input,
+            inline_edit: None,
             loading: true,
             error: None,
             generation: 0,
             watcher: None,
             scroll: VirtualListScrollHandle::new(),
             tab_panel: None,
+            searching: false,
+            search_complete: false,
+            search_cancel: Arc::new(AtomicBool::new(false)),
+            search_gen: 0,
+            pending_selection,
+            restore_scroll,
             _subscriptions: subscriptions,
         };
         this.load(true, window, cx);
+        // A restored deep-search tab re-runs its query (results are never
+        // serialized). The folder load above still populates `all_entries` so
+        // leaving search mode shows the folder instantly.
+        if this.session.search_deep && !this.session.search_query.trim().is_empty() {
+            this.run_search(cx);
+        }
         this
     }
 
@@ -153,12 +264,17 @@ impl ExplorerPanel {
         let path = match crate::storage::local().guard().sanitize(&path) {
             Ok(path) => path,
             Err(error) => {
-                window.push_notification(Notification::error(error.to_string()), cx);
+                window.push_notification(crate::ui::toast::error(error.to_string()), cx);
                 return;
             }
         };
         if path == self.session.cwd {
             return;
+        }
+        // Opening a folder (including a search result) drops search mode so the
+        // destination folder is shown normally.
+        if self.searching {
+            self.leave_search_mode(window, cx);
         }
         self.back_stack.push(self.session.cwd.clone());
         self.fwd_stack.clear();
@@ -232,8 +348,22 @@ impl ExplorerPanel {
                     Ok(entries) => {
                         this.all_entries = entries;
                         this.error = None;
-                        this.apply_view(cx);
-                        this.restore_selection(&keep, cx);
+                        // In search mode the displayed `entries` are match
+                        // results — don't overwrite them with the folder view.
+                        if !this.searching {
+                            this.apply_view(cx);
+                            if !keep.is_empty() {
+                                this.restore_selection(&keep, cx);
+                            } else if !this.pending_selection.is_empty() {
+                                let restore = std::mem::take(&mut this.pending_selection);
+                                this.restore_selection(&restore, cx);
+                                this.scroll.scroll_to_item(
+                                    this.restore_scroll.min(this.entries.len().saturating_sub(1)),
+                                    ScrollStrategy::Top,
+                                );
+                                this.restore_scroll = 0;
+                            }
+                        }
                         this.start_watch(window, cx);
                     }
                     Err(error) => {
@@ -280,7 +410,17 @@ impl ExplorerPanel {
             })
         });
 
-        // Selection indices are no longer meaningful after refiltering.
+        // Selection indices are no longer meaningful after refiltering, and
+        // neither is an in-place rename editor anchored to a row index.
+        if matches!(
+            self.inline_edit,
+            Some(InlineEdit {
+                kind: InlineEditKind::Rename { .. },
+                ..
+            })
+        ) {
+            self.inline_edit = None;
+        }
         self.selected.clear();
         self.anchor = None;
         self.entries = entries;
@@ -336,6 +476,121 @@ impl ExplorerPanel {
             }
         })
         .detach();
+    }
+
+    // -- Search ------------------------------------------------------------
+
+    /// The text box changed. Interpret it as a recursive query (deep mode) or
+    /// an in-view filter, and persist it into the session.
+    fn on_query_changed(&mut self, cx: &mut Context<Self>) {
+        let text = self.filter_input.read(cx).value().to_string();
+        if self.session.search_deep {
+            self.session.search_query = text;
+            self.run_search(cx);
+        } else {
+            self.session.filter = text;
+            self.apply_view(cx);
+        }
+    }
+
+    /// Toggle recursive search on/off (the toolbar magnifier). Carries the
+    /// current text across as the query / filter and persists the mode.
+    pub(super) fn toggle_deep_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.session.search_deep = !self.session.search_deep;
+        let text = self.filter_input.read(cx).value().to_string();
+        let placeholder = if self.session.search_deep {
+            "Search subfolders…"
+        } else {
+            "Filter…"
+        };
+        self.filter_input
+            .update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
+        if self.session.search_deep {
+            self.session.search_query = text;
+            self.run_search(cx);
+        } else {
+            self.session.filter = text;
+            self.leave_search_mode(window, cx);
+        }
+        // Persist the mode change with the next layout save.
+        cx.emit(PanelEvent::LayoutChanged);
+    }
+
+    /// Whether recursive search is the active display mode.
+    pub(super) fn is_deep_search(&self) -> bool {
+        self.session.search_deep
+    }
+
+    /// Start (or restart) the background recursive search from the current
+    /// query. Supersedes any in-flight search.
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        // Invalidate any prior search and its streamed results.
+        self.search_gen = self.search_gen.wrapping_add(1);
+        let generation = self.search_gen;
+        self.search_cancel.store(true, Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.search_cancel = cancel.clone();
+
+        self.searching = true;
+        self.search_complete = false;
+        self.entries.clear();
+        self.selected.clear();
+        self.anchor = None;
+        self.push_selection_ctx(cx);
+        cx.notify();
+
+        let query = self.session.search_query.clone();
+        if query.trim().is_empty() {
+            self.search_complete = true;
+            return;
+        }
+        let root = self.session.cwd.clone();
+        let mut rx = search::start(root, query, cancel, cx.background_executor().clone());
+        cx.spawn(async move |this, cx| {
+            while let Some(update) = rx.next().await {
+                let stop = this
+                    .update(cx, |this, cx| {
+                        // A newer search (or a mode exit) superseded this one.
+                        if this.search_gen != generation || !this.searching {
+                            return true;
+                        }
+                        match update {
+                            SearchUpdate::Batch(mut batch) => {
+                                this.entries.append(&mut batch);
+                                cx.notify();
+                                false
+                            }
+                            SearchUpdate::Done { .. } => {
+                                this.search_complete = true;
+                                cx.notify();
+                                true
+                            }
+                        }
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Leave search mode and restore the folder listing. Clears the query text
+    /// so the folder is shown unfiltered.
+    fn leave_search_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_gen = self.search_gen.wrapping_add(1);
+        self.search_cancel.store(true, Ordering::Relaxed);
+        self.searching = false;
+        self.search_complete = false;
+        self.session.search_deep = false;
+        self.session.search_query.clear();
+        self.session.filter.clear();
+        self.filter_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_placeholder("Filter…", window, cx);
+        });
+        self.apply_view(cx);
     }
 
     // -- Selection ---------------------------------------------------------
@@ -424,20 +679,32 @@ impl ExplorerPanel {
         };
         if entry.is_dir() {
             self.navigate_to(entry.path, window, cx);
+        } else if crate::core::file_type::RISKY_OPEN_EXTS.contains(&entry.ext.as_str()) {
+            // Executables and scripts run when shell-opened — confirm first.
+            super::dialogs::confirm_open_executable(entry, window, cx);
         } else {
-            match crate::storage::local().guard().sanitize(&entry.path) {
-                Ok(path) => {
-                    if let Err(error) = open::that_detached(&path) {
-                        window.push_notification(
-                            Notification::error(format!("Could not open “{}”: {error}", entry.name)),
-                            cx,
-                        );
-                    }
-                }
-                Err(error) => {
-                    window.push_notification(Notification::error(error.to_string()), cx);
-                }
-            }
+            shell_open(&entry.name, &entry.path, window, cx);
+        }
+    }
+
+    /// Double-click behavior: folders navigate; any file reveals the inspector
+    /// preview (the selection feeds it). Unlike [`open_entry`], this never
+    /// launches the OS handler — external open stays on Enter / context menu,
+    /// so double-clicking can never accidentally execute a program.
+    pub(super) fn open_or_preview_entry(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.entries.get(ix).cloned() else {
+            return;
+        };
+        if entry.is_dir() {
+            self.navigate_to(entry.path, window, cx);
+        } else {
+            self.select_only(ix, cx);
+            window.dispatch_action(Box::new(actions::RevealPreview), cx);
         }
     }
 
@@ -454,7 +721,7 @@ impl ExplorerPanel {
             clipboard.cut = cut;
         });
         window.push_notification(
-            Notification::info(format!(
+            crate::ui::toast::info(format!(
                 "{} {count} item{} — paste with Ctrl+V",
                 if cut { "Cut" } else { "Copied" },
                 if count == 1 { "" } else { "s" }
@@ -542,6 +809,205 @@ impl ExplorerPanel {
         self.set_zoom(self.session.zoom + delta, cx);
     }
 
+    // -- Inline editing ----------------------------------------------------
+
+    /// Index of the row currently being renamed in place, if any.
+    pub(super) fn renaming_ix(&self) -> Option<usize> {
+        match &self.inline_edit {
+            Some(InlineEdit {
+                kind: InlineEditKind::Rename { ix, .. },
+                ..
+            }) => Some(*ix),
+            _ => None,
+        }
+    }
+
+    fn start_inline_edit(
+        &mut self,
+        kind: InlineEditKind,
+        initial: &str,
+        placeholder: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.inline_edit.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(initial.to_string())
+                .placeholder(placeholder)
+        });
+        let mut subs = Vec::new();
+        subs.push(cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                // Enter is the only commit; losing focus cancels, so a stray
+                // click can never mutate the filesystem.
+                InputEvent::PressEnter { .. } => this.commit_inline_edit(window, cx),
+                InputEvent::Blur => this.cancel_inline_edit(cx),
+                _ => {}
+            },
+        ));
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.inline_edit = Some(InlineEdit {
+            kind,
+            input,
+            _subs: subs,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.inline_edit.is_some() {
+            return;
+        }
+        let selected = self.selected_entries();
+        let Some(entry) = selected.first().cloned() else {
+            return;
+        };
+        if selected.len() > 1 {
+            window.push_notification(crate::ui::toast::info("Select a single item to rename"), cx);
+            return;
+        }
+        let Some(ix) = self.entries.iter().position(|e| e.path == entry.path) else {
+            return;
+        };
+        self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        self.start_inline_edit(
+            InlineEditKind::Rename {
+                ix,
+                path: entry.path.clone(),
+            },
+            &entry.name,
+            "New name",
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn start_create(
+        &mut self,
+        directory: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.inline_edit.is_some() {
+            return;
+        }
+        self.start_inline_edit(
+            InlineEditKind::Create { directory },
+            "",
+            if directory { "Folder name" } else { "File name" },
+            window,
+            cx,
+        );
+    }
+
+    /// Close the editor without committing. Does not move focus — blur-cancel
+    /// must never steal focus from whatever the user clicked into.
+    pub(super) fn cancel_inline_edit(&mut self, cx: &mut Context<Self>) {
+        if self.inline_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn commit_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.inline_edit.take() else {
+            return;
+        };
+        let name = edit.input.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            window.focus(&self.focus_handle, cx);
+            cx.notify();
+            return;
+        }
+        if let Err(error) = validate_name(&name) {
+            // Keep the editor open so the user can fix the name.
+            window.push_notification(crate::ui::toast::error(error), cx);
+            self.inline_edit = Some(edit);
+            return;
+        }
+        match &edit.kind {
+            InlineEditKind::Rename { path, .. } => {
+                let old_path = path.clone();
+                if let Some(parent) = old_path.parent() {
+                    let new_path = parent.join(&name);
+                    if new_path != old_path {
+                        PikuState::global(cx).jobs.clone().update(cx, |jobs, cx| {
+                            jobs.submit_rename(old_path, new_path, window, cx);
+                        });
+                    }
+                }
+            }
+            InlineEditKind::Create { directory } => {
+                let path = self.session.cwd.join(&name);
+                let directory = *directory;
+                PikuState::global(cx).jobs.clone().update(cx, |jobs, cx| {
+                    if directory {
+                        jobs.submit_new_folder(path, window, cx);
+                    } else {
+                        jobs.submit_new_file(path, window, cx);
+                    }
+                });
+            }
+        }
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    /// The pinned editor row shown above the listing while creating a folder
+    /// or file. Same 30px metrics as a list row, same icon language.
+    fn render_create_row(
+        &self,
+        directory: bool,
+        input: gpui::Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .flex_none()
+            .px_3()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .on_key_down(cx.listener(Self::on_editor_key_down))
+            .child(
+                Icon::new(if directory {
+                    IconName::Folder
+                } else {
+                    IconName::File
+                })
+                .size(gpui::px(16.))
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .rounded(cx.theme().radius)
+                    .child(Input::new(&input).small()),
+            )
+    }
+
+    /// Escape closes the editor and hands focus back to the pane. Wired as an
+    /// `on_key_down` on the editor's wrapper (the Input's own Escape action
+    /// ends in `cx.propagate()`, so the event reaches the wrapper).
+    pub(super) fn on_editor_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key == "escape" {
+            self.cancel_inline_edit(cx);
+            window.focus(&self.focus_handle, cx);
+        }
+    }
+
     // -- Action handlers ---------------------------------------------------
 
     fn on_toggle_hidden(&mut self, _: &actions::ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
@@ -551,6 +1017,120 @@ impl ExplorerPanel {
             settings.save();
             cx.notify();
         });
+    }
+
+    // -- Tab identity ------------------------------------------------------
+
+    /// This tab's stable id (used as the drag source and by Duplicate Tab).
+    pub fn session_id(&self) -> String {
+        self.session.id.clone()
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        self.session.pinned
+    }
+
+    /// The tab label: the user's title override, else the folder name.
+    pub(super) fn tab_title(&self) -> SharedString {
+        match &self.session.title {
+            Some(title) if !title.trim().is_empty() => title.clone().into(),
+            _ => self.folder_name(),
+        }
+    }
+
+    /// A full, independent copy of this tab's session for Duplicate Tab. Folds
+    /// the live (capped) history stacks in, exactly like `dump`, then re-ids.
+    pub fn duplicate_session(&self) -> PaneSession {
+        self.session_for_dump().duplicate()
+    }
+
+    /// A fresh session at this pane's folder for a NEW tab: inherits the view
+    /// preferences (mode / sort / zoom) but starts with clean history,
+    /// selection, and search, and a brand-new identity.
+    pub fn new_tab_session(&self) -> PaneSession {
+        let mut session = PaneSession::at(self.session.cwd.clone());
+        session.view = self.session.view;
+        session.sort = self.session.sort;
+        session.ascending = self.session.ascending;
+        session.zoom = self.session.zoom;
+        session
+    }
+
+    /// The session with live panel state (history, selection, scroll) folded
+    /// back in — the single source of truth for both `dump` and duplication.
+    fn session_for_dump(&self) -> PaneSession {
+        fn tail(stack: &[PathBuf], cap: usize) -> Vec<PathBuf> {
+            stack[stack.len().saturating_sub(cap)..].to_vec()
+        }
+        let mut session = self.session.clone();
+        session.back_stack = tail(&self.back_stack, MAX_HISTORY);
+        session.fwd_stack = tail(&self.fwd_stack, MAX_HISTORY);
+        // Selection is meaningless while showing search results.
+        session.selection = if self.searching {
+            Vec::new()
+        } else {
+            self.selected_entries().iter().map(|e| e.path.clone()).collect()
+        };
+        session.scroll_first = self.scroll.base_handle().top_item();
+        session
+    }
+
+    /// Toggle this tab's pinned state. Pinned tabs are non-closable and keep
+    /// their pin badge; the change persists with the layout.
+    pub fn toggle_pin(&mut self, cx: &mut Context<Self>) {
+        self.session.pinned = !self.session.pinned;
+        cx.emit(PanelEvent::LayoutChanged);
+        cx.notify();
+    }
+
+    // -- Drag & drop -------------------------------------------------------
+
+    /// The paths a drag from row `ix` should carry: the whole selection if the
+    /// row is part of it, otherwise just that row.
+    pub(super) fn drag_paths(&self, ix: usize) -> Vec<PathBuf> {
+        if self.selected.contains(&ix) && self.selected.len() > 1 {
+            self.selected_entries().iter().map(|e| e.path.clone()).collect()
+        } else {
+            self.entries.get(ix).map(|e| vec![e.path.clone()]).into_iter().flatten().collect()
+        }
+    }
+
+    /// Receive a set of dropped paths into `dest` (move or copy). Every path is
+    /// re-sanitized inside the job queue, which also records the audit entry.
+    pub(super) fn drop_into(
+        &mut self,
+        paths: Vec<PathBuf>,
+        dest: PathBuf,
+        is_move: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Skip anything already in the destination directory (a no-op move, or
+        // a copy that would only clash names).
+        let dest_ref = dest.as_path();
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| p.parent() != Some(dest_ref) && p.as_path() != dest_ref)
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        PikuState::global(cx).jobs.clone().update(cx, |jobs, cx| {
+            jobs.submit_copy(paths, dest, is_move, window, cx);
+        });
+    }
+
+    /// Copy files dropped from outside the app (OS drag-in) into `dest`.
+    pub(super) fn drop_external(
+        &mut self,
+        paths: Vec<PathBuf>,
+        dest: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // External paths are always copied (never moved out of their origin),
+        // and are sanitized by the job queue before any filesystem touch.
+        self.drop_into(paths, dest, false, window, cx);
     }
 }
 
@@ -612,10 +1192,13 @@ impl Render for ExplorerPanel {
             .on_action(cx.listener(|this, _: &actions::PasteClipboard, window, cx| this.paste(window, cx)))
             .on_action(cx.listener(|this, _: &actions::DeleteSelection, window, cx| this.delete_selection(window, cx)))
             .on_action(cx.listener(|this, _: &actions::RenameSelection, window, cx| {
-                super::dialogs::rename_selected(this, window, cx);
+                this.start_rename(window, cx);
             }))
             .on_action(cx.listener(|this, _: &actions::NewFolder, window, cx| {
-                super::dialogs::new_folder(this, window, cx);
+                this.start_create(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::NewFile, window, cx| {
+                this.start_create(false, window, cx);
             }))
             .on_action(cx.listener(Self::on_toggle_hidden))
             .on_action(cx.listener(|this, _: &actions::ToggleViewMode, _, cx| this.toggle_view(cx)))
@@ -654,10 +1237,34 @@ impl Render for ExplorerPanel {
             .on_action(cx.listener(|this, _: &actions::ZoomOut, _, cx| this.zoom_by(-ZOOM_STEP, cx)))
             .on_action(cx.listener(|this, _: &actions::ResetZoom, _, cx| this.set_zoom(1.0, cx)))
             .child(self.render_toolbar(window, cx))
+            .children(match &self.inline_edit {
+                Some(InlineEdit {
+                    kind: InlineEditKind::Create { directory },
+                    input,
+                    ..
+                }) => {
+                    let (directory, input) = (*directory, input.clone());
+                    Some(self.render_create_row(directory, input, cx))
+                }
+                _ => None,
+            })
             .child(
                 div()
+                    .id("explorer-content")
                     .flex_1()
                     .min_h_0()
+                    // Dropping onto empty space moves/copies into this folder.
+                    // Ctrl forces a copy; external OS files always copy.
+                    .drag_over::<DraggedPaths>(|style, _, _, cx| style.bg(cx.theme().drop_target))
+                    .on_drop(cx.listener(|this, dragged: &DraggedPaths, window, cx| {
+                        let dest = this.session.cwd.clone();
+                        let is_move = !window.modifiers().control;
+                        this.drop_into(dragged.paths.clone(), dest, is_move, window, cx);
+                    }))
+                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                        let dest = this.session.cwd.clone();
+                        this.drop_external(paths.paths().to_vec(), dest, window, cx);
+                    }))
                     .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
                         if !event.modifiers.control {
                             return;
@@ -699,23 +1306,72 @@ impl Panel for ExplorerPanel {
     }
 
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.folder_name())
+        Some(self.tab_title())
     }
 
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The storage-type icon leads the label. `Local` uses the folder glyph;
+        // a future cloud tab would swap in a cloud icon here.
+        let icon = match self.session.storage {
+            crate::state::pane_state::StorageKind::Local => IconName::Folder,
+        };
         gpui_component::h_flex()
             .gap_1()
             .items_center()
             .child(
-                Icon::new(IconName::Folder)
+                Icon::new(icon)
                     .size(gpui::px(14.))
                     .text_color(cx.theme().muted_foreground),
             )
-            .child(self.folder_name())
+            .child(self.tab_title())
     }
 
+    /// Pin/search badges after the tab label. Kept cheap — this runs on every
+    /// tab render.
+    fn title_suffix(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if !self.session.pinned && !self.searching {
+            return None;
+        }
+        let mut row = h_flex().gap_0p5().items_center().ml_1();
+        if self.session.pinned {
+            row = row.child(
+                Icon::new(PikuIcon::Pin)
+                    .size(gpui::px(11.))
+                    .text_color(cx.theme().muted_foreground),
+            );
+        }
+        if self.searching {
+            row = row.child(
+                Icon::new(IconName::Search)
+                    .size(gpui::px(11.))
+                    .text_color(cx.theme().muted_foreground),
+            );
+        }
+        Some(row)
+    }
+
+    /// Pinned tabs cannot be closed by accident.
     fn closable(&self, _: &App) -> bool {
-        true
+        !self.session.pinned
+    }
+
+    fn dropdown_menu(
+        &mut self,
+        menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> PopupMenu {
+        let pin_label = if self.session.pinned {
+            "Unpin tab"
+        } else {
+            "Pin tab"
+        };
+        menu.menu(pin_label, Box::new(actions::PinTab))
+            .menu("Duplicate tab", Box::new(actions::DuplicateTab))
     }
 
     fn on_added_to(
@@ -736,19 +1392,47 @@ impl Panel for ExplorerPanel {
     }
 
     fn dump(&self, _cx: &App) -> PanelState {
-        // The live history stacks ride along in the serialized session
-        // (capped) so back/forward survive a restart.
-        fn tail(stack: &[PathBuf], cap: usize) -> Vec<PathBuf> {
-            stack[stack.len().saturating_sub(cap)..].to_vec()
-        }
-        let mut session = self.session.clone();
-        session.back_stack = tail(&self.back_stack, MAX_HISTORY);
-        session.fwd_stack = tail(&self.fwd_stack, MAX_HISTORY);
-
+        // Fold live panel state (capped history, selection, scroll) back into
+        // the session so it all survives a restart.
+        let session = self.session_for_dump();
         let mut state = PanelState::new(self);
         if let Ok(value) = serde_json::to_value(&session) {
             state.info = gpui_component::dock::PanelInfo::panel(value);
         }
         state
+    }
+}
+
+/// Hand a file to the OS default handler, hardened against link tricks:
+/// sanitize the lexical path, resolve junctions/symlinks with
+/// `canonicalize`, then re-authorize the *real* target — a link inside an
+/// allowed root must not open something outside it.
+pub(super) fn shell_open(name: &str, path: &Path, window: &mut Window, cx: &mut App) {
+    let resolved = crate::storage::local()
+        .guard()
+        .sanitize(path)
+        .map_err(|error| error.to_string())
+        .and_then(|lexical| {
+            std::fs::canonicalize(&lexical)
+                .map_err(|error| format!("resolving {}: {error}", lexical.display()))
+        })
+        .and_then(|real| {
+            crate::storage::local()
+                .guard()
+                .sanitize(&real)
+                .map_err(|_| format!("“{name}” points outside the allowed locations"))
+        });
+    match resolved {
+        Ok(real) => {
+            if let Err(error) = open::that_detached(&real) {
+                window.push_notification(
+                    crate::ui::toast::error(format!("Could not open “{name}”: {error}")),
+                    cx,
+                );
+            }
+        }
+        Err(error) => {
+            window.push_notification(crate::ui::toast::error(error), cx);
+        }
     }
 }

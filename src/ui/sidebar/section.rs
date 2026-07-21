@@ -4,7 +4,7 @@ use gpui::{
     App, ClickEvent, Div, InteractiveElement as _, ParentElement,
     StatefulInteractiveElement as _, Styled, Window, div, px,
 };
-use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, tooltip::Tooltip, v_flex};
 
 pub fn section(
     id: &'static str,
@@ -33,6 +33,10 @@ pub fn section(
                 .cursor_pointer()
                 .hover(|style| style.bg(cx.theme().sidebar_accent))
                 .on_click(on_toggle)
+                .tooltip(move |window, cx| {
+                    let verb = if open { "Collapse" } else { "Expand" };
+                    Tooltip::new(format!("{verb} {title}")).build(window, cx)
+                })
                 .child(
                     Icon::new(chevron)
                         .size(px(14.))

@@ -37,8 +37,19 @@ pub fn save_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Upper bound on any state file we are willing to read into memory. PIKU
+/// never writes files anywhere near this size; anything larger is corrupt or
+/// tampered with, and callers fall back to defaults.
+const MAX_STATE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
 pub fn load_json<T: DeserializeOwned>(name: &str) -> anyhow::Result<T> {
     let path = state_path(name);
+    let len = fs::metadata(&path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .len();
+    if len > MAX_STATE_FILE_BYTES {
+        anyhow::bail!("state file {} is too large ({len} bytes)", path.display());
+    }
     let json = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     Ok(serde_json::from_str(&json)?)
 }

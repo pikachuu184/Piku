@@ -1,0 +1,18 @@
+# Normalize line endings to LF in the repository; check out native on Windows.
+* text=auto eol=lf
+
+# Explicit text types.
+*.rs   text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.svg  text eol=lf
+*.rc   text eol=lf
+
+# Binary assets — never diffed or line-ending converted.
+*.dll binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary

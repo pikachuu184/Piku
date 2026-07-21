@@ -21,7 +21,15 @@ pub trait StorageProvider: Send + Sync + 'static {
     #[allow(dead_code)]
     fn stat(&self, path: &Path) -> anyhow::Result<FsEntry>;
 
+    /// Read at most `max` bytes from the start of a regular file, returning
+    /// the bytes and the file's total size. Refuses symlinks and directories.
+    /// Reads are not audited — the audit log is deliberately mutation-only.
+    fn read_head(&self, path: &Path, max: usize) -> anyhow::Result<(Vec<u8>, u64)>;
+
     fn create_dir(&self, path: &Path) -> anyhow::Result<()>;
+
+    /// Create a new empty file; fails if the path already exists.
+    fn create_file(&self, path: &Path) -> anyhow::Result<()>;
 
     fn rename(&self, from: &Path, to: &Path) -> anyhow::Result<()>;
 

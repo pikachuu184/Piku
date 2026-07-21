@@ -11,6 +11,7 @@ pub enum JobKind {
     Delete,
     Rename,
     NewFolder,
+    NewFile,
 }
 
 impl JobKind {
@@ -21,6 +22,7 @@ impl JobKind {
             Self::Delete => "Deleting",
             Self::Rename => "Renaming",
             Self::NewFolder => "Creating folder",
+            Self::NewFile => "Creating file",
         }
     }
 }

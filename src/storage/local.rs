@@ -29,6 +29,24 @@ impl LocalProvider {
     pub fn guard(&self) -> &PathGuard {
         &self.guard
     }
+
+    /// Sanitize a path and open it read-only, returning the handle and the
+    /// file's total size. For bounded preview parsers that need `Seek`
+    /// (zip central directories, audio tag readers). Refuses symlinks and
+    /// directories; callers must keep their own read caps.
+    pub fn open_read(&self, path: &Path) -> anyhow::Result<(fs::File, u64)> {
+        let path = self.guard.sanitize(path)?;
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("reading metadata of {}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            bail!("refusing to read through a link: {}", path.display());
+        }
+        if !metadata.is_file() {
+            bail!("`{}` is not a regular file", path.display());
+        }
+        let file = fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+        Ok((file, metadata.len()))
+    }
 }
 
 impl StorageProvider for LocalProvider {
@@ -60,12 +78,36 @@ impl StorageProvider for LocalProvider {
 
     fn create_dir(&self, path: &Path) -> anyhow::Result<()> {
         let path = self.guard.sanitize(path)?;
-        if path.exists() {
-            bail!("`{}` already exists", path.display());
-        }
-        let result = fs::create_dir(&path).with_context(|| format!("creating {}", path.display()));
+        // No `exists()` pre-check: `create_dir` itself fails atomically when
+        // the target exists, so there is no TOCTOU window to race.
+        let result = fs::create_dir(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::anyhow!("`{}` already exists", path.display())
+            } else {
+                anyhow::Error::new(error).context(format!("creating {}", path.display()))
+            }
+        });
         audit::record(
             "create_dir",
+            &path,
+            None,
+            result.is_ok(),
+            result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+        );
+        result
+    }
+
+    fn create_file(&self, path: &Path) -> anyhow::Result<()> {
+        let path = self.guard.sanitize(path)?;
+        // `create_new` makes the existence check atomic — no TOCTOU window.
+        let result = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map(|_| ())
+            .with_context(|| format!("creating {}", path.display()));
+        audit::record(
+            "create_file",
             &path,
             None,
             result.is_ok(),
@@ -77,11 +119,15 @@ impl StorageProvider for LocalProvider {
     fn rename(&self, from: &Path, to: &Path) -> anyhow::Result<()> {
         let from = self.guard.sanitize(from)?;
         let to = self.guard.sanitize(to)?;
-        if to.exists() {
-            bail!("`{}` already exists", to.display());
-        }
-        let result =
-            fs::rename(&from, &to).with_context(|| format!("renaming {}", from.display()));
+        // No `exists()` pre-check: Windows MoveFileEx (without
+        // REPLACE_EXISTING) fails atomically when the target exists.
+        let result = fs::rename(&from, &to).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow::anyhow!("`{}` already exists", to.display())
+            } else {
+                anyhow::Error::new(error).context(format!("renaming {}", from.display()))
+            }
+        });
         audit::record(
             "rename",
             &from,
@@ -90,6 +136,15 @@ impl StorageProvider for LocalProvider {
             result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
         );
         result
+    }
+
+    fn read_head(&self, path: &Path, max: usize) -> anyhow::Result<(Vec<u8>, u64)> {
+        let (file, total) = self.open_read(path)?;
+        let mut bytes = Vec::with_capacity(max.min(total as usize));
+        file.take(max as u64)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("reading {}", path.display()))?;
+        Ok((bytes, total))
     }
 
     fn copy_file(

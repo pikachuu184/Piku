@@ -21,6 +21,10 @@ pub const ACCENT: u32 = 0xFFFFFF;
 /// The strict corner radius used across the whole application.
 pub const RADIUS: f32 = 6.0;
 
+/// Checkerboard grays for the image-preview transparency backdrop.
+pub const CHECKER_A: u32 = 0x1A1A1A;
+pub const CHECKER_B: u32 = 0x212121;
+
 pub fn solid(hex: u32) -> Hsla {
     rgb(hex).into()
 }
@@ -41,6 +45,7 @@ pub fn apply(cx: &mut App) {
     theme.tile_radius = px(RADIUS);
     theme.shadow = false;
     theme.tile_shadow = false;
+    theme.highlight_theme = monochrome_highlight_theme();
 
     let c = &mut theme.colors;
 
@@ -202,4 +207,54 @@ pub fn apply(cx: &mut App) {
     c.magenta_light = solid(0xC0C0C0);
     c.cyan = solid(0x8C8C8C);
     c.cyan_light = solid(TEXT_SECONDARY);
+}
+
+/// Grayscale syntax-highlight theme for the preview code editor: hierarchy
+/// through luminance only, matching the monochrome rule (drive-usage
+/// category colors remain the app's sole hue exception).
+fn monochrome_highlight_theme() -> std::sync::Arc<gpui_component::highlighter::HighlightTheme> {
+    // Zed-compatible theme JSON — gpui-component deserializes hex colors.
+    const THEME_JSON: &str = r##"{
+        "name": "piku-monochrome",
+        "appearance": "dark",
+        "style": {
+            "editor.line_number": "#525252",
+            "editor.active_line_number": "#A3A3A3",
+            "editor.active_line.background": "#141414",
+            "syntax": {
+                "keyword": { "color": "#EDEDED" },
+                "function": { "color": "#D4D4D4" },
+                "type": { "color": "#D4D4D4" },
+                "constructor": { "color": "#D4D4D4" },
+                "string": { "color": "#A3A3A3" },
+                "number": { "color": "#C9C9C9" },
+                "boolean": { "color": "#C9C9C9" },
+                "constant": { "color": "#C9C9C9" },
+                "comment": { "color": "#737373" },
+                "comment.doc": { "color": "#737373" },
+                "property": { "color": "#B5B5B5" },
+                "attribute": { "color": "#B5B5B5" },
+                "variable": { "color": "#EDEDED" },
+                "operator": { "color": "#8C8C8C" },
+                "punctuation": { "color": "#8C8C8C" },
+                "tag": { "color": "#D4D4D4" },
+                "label": { "color": "#D4D4D4" },
+                "embedded": { "color": "#EDEDED" },
+                "emphasis": { "color": "#EDEDED" },
+                "emphasis.strong": { "color": "#FFFFFF" },
+                "title": { "color": "#FFFFFF" },
+                "link_text": { "color": "#EDEDED" },
+                "link_uri": { "color": "#A3A3A3" },
+                "hint": { "color": "#737373" }
+            }
+        }
+    }"##;
+    match serde_json::from_str(THEME_JSON) {
+        Ok(theme) => std::sync::Arc::new(theme),
+        Err(error) => {
+            // Never panic over a theme: fall back to the library default.
+            tracing::warn!("monochrome highlight theme failed to parse: {error}");
+            gpui_component::highlighter::HighlightTheme::default_dark()
+        }
+    }
 }

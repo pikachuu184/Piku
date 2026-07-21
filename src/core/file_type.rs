@@ -67,25 +67,16 @@ pub fn categorize_ext(ext: &str) -> FileCategory {
     }
 }
 
-/// True when the file is small structured text that is safe to preview.
-pub fn is_text_previewable(entry: &FsEntry) -> bool {
-    entry.kind == EntryKind::File
-        && entry.size <= 512 * 1024
-        && matches!(
-            categorize_ext(&entry.ext),
-            FileCategory::Code | FileCategory::Document
-        )
-        && !matches!(
-            entry.ext.as_str(),
-            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp"
-                | "epub"
-        )
-}
+// Per-format preview gating now lives in `crate::preview::decide_kind` —
+// every file gets some preview (hex at worst), so the old
+// `is_*_previewable` predicates are gone.
 
-pub fn is_image_previewable(entry: &FsEntry) -> bool {
-    entry.kind == EntryKind::File
-        && matches!(
-            entry.ext.as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "svg"
-        )
-}
+/// Extensions the Windows shell will *execute* rather than display when
+/// opened with the default association. Shell-open of any of these asks for
+/// confirmation first — this is the app's largest code-execution surface.
+/// (`.js` is source code in the listing, but double-clicking it runs it via
+/// Windows Script Host, which is exactly the risk.)
+pub const RISKY_OPEN_EXTS: &[&str] = &[
+    "exe", "bat", "cmd", "com", "scr", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh",
+    "msi", "msp", "hta", "pif", "lnk", "cpl", "jar", "reg",
+];

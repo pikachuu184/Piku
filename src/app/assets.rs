@@ -37,6 +37,7 @@ impl AssetSource for PikuAssets {
 /// Additional Lucide icons that the bundled asset crate does not ship.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PikuIcon {
+    Logo,
     House,
     Clock,
     Pin,
@@ -55,14 +56,33 @@ pub enum PikuIcon {
     Pencil,
     Monitor,
     FolderPlus,
+    FilePlus,
     Columns2,
     Rows2,
     Layers,
+    // Preview / media controls.
+    Play,
+    Pause,
+    Square,
+    Rewind,
+    FastForward,
+    Volume2,
+    VolumeX,
+    Maximize,
+    Scan,
+    ZoomIn,
+    ZoomOut,
+    Eye,
+    ListTree,
+    Braces,
+    ExternalLink,
+    Maximize2,
 }
 
 impl IconNamed for PikuIcon {
     fn path(self) -> SharedString {
         match self {
+            Self::Logo => "icons/piku/logo.svg",
             Self::House => "icons/piku/house.svg",
             Self::Clock => "icons/piku/clock.svg",
             Self::Pin => "icons/piku/pin.svg",
@@ -81,9 +101,26 @@ impl IconNamed for PikuIcon {
             Self::Pencil => "icons/piku/pencil.svg",
             Self::Monitor => "icons/piku/monitor.svg",
             Self::FolderPlus => "icons/piku/folder-plus.svg",
+            Self::FilePlus => "icons/piku/file-plus.svg",
             Self::Columns2 => "icons/piku/columns-2.svg",
             Self::Rows2 => "icons/piku/rows-2.svg",
             Self::Layers => "icons/piku/layers.svg",
+            Self::Play => "icons/piku/play.svg",
+            Self::Pause => "icons/piku/pause.svg",
+            Self::Square => "icons/piku/square.svg",
+            Self::Rewind => "icons/piku/rewind.svg",
+            Self::FastForward => "icons/piku/fast-forward.svg",
+            Self::Volume2 => "icons/piku/volume-2.svg",
+            Self::VolumeX => "icons/piku/volume-x.svg",
+            Self::Maximize => "icons/piku/maximize.svg",
+            Self::Scan => "icons/piku/scan.svg",
+            Self::ZoomIn => "icons/piku/zoom-in.svg",
+            Self::ZoomOut => "icons/piku/zoom-out.svg",
+            Self::Eye => "icons/piku/eye.svg",
+            Self::ListTree => "icons/piku/list-tree.svg",
+            Self::Braces => "icons/piku/braces.svg",
+            Self::ExternalLink => "icons/piku/external-link.svg",
+            Self::Maximize2 => "icons/piku/maximize-2.svg",
         }
         .into()
     }

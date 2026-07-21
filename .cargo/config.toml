@@ -1,0 +1,5 @@
+# GPUI element trees produce deep render call chains; debug builds (no
+# inlining, large frames) overflow the 1 MiB Windows default main-thread
+# stack once the UI gets moderately nested. 8 MiB matches what Zed ships.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]

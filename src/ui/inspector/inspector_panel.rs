@@ -1,30 +1,84 @@
-//! Right-dock inspector: adapts to the current selection with previews and
-//! metadata instead of duplicating the file listing.
+//! Right-dock inspector: adapts to the current selection with a
+//! provider-driven preview (see [`crate::preview`]) plus metadata rows.
+//! Decoding always happens on the background executor; a generation counter
+//! plus a (path, mtime) key guard against stale results and double loads.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    StyledImage as _, Subscription, Window, div, img, px,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName,
     dock::{Panel, PanelControl, PanelEvent},
+    input::InputState,
     v_flex,
 };
 
-use crate::core::entry::FsEntry;
-use crate::core::file_type::{categorize, is_image_previewable, is_text_previewable};
+use crate::core::entry::{EntryKind, FsEntry};
+use crate::core::file_type::categorize;
 use crate::core::format::{format_size, format_time};
+use crate::preview::content::PreviewContent;
+use crate::preview::{decide_kind, loader};
 use crate::state::PikuState;
 use crate::ui::components::{category_icon, empty_state};
 
 pub struct InspectorPanel {
     focus_handle: FocusHandle,
-    preview_text: Option<SharedString>,
-    preview_for: Option<PathBuf>,
+    /// The finished preview for exactly one file, keyed by (path, mtime).
+    pub(super) loaded: Option<LoadedPreview>,
+    /// Path currently being decoded on the background executor.
+    pub(super) loading_for: Option<PathBuf>,
+    /// Staleness guard: results from an older generation are dropped.
+    generation: u64,
+    /// Ephemeral per-file view toggles (reset on every new file).
+    pub(super) view: PreviewViewState,
+    /// One lazily-created code editor entity, re-pointed per file.
+    pub(super) code_state: Option<Entity<InputState>>,
+    /// What the code editor currently holds, to avoid re-setting on render.
+    pub(super) code_synced: Option<CodeSyncKey>,
+    /// Lazily-created tree for the structured (JSON/YAML/TOML) tree view.
+    pub(super) tree_state: Option<Entity<gpui_component::tree::TreeState>>,
+    /// Which file the tree currently holds, to avoid rebuilding on every render.
+    pub(super) tree_synced: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
+}
+
+pub(super) struct LoadedPreview {
+    pub path: PathBuf,
+    pub mtime: Option<SystemTime>,
+    pub content: PreviewContent,
+}
+
+pub(super) struct PreviewViewState {
+    pub markdown_raw: bool,
+    pub json_pretty: bool,
+    /// Structured data: show the collapsible tree instead of pretty/raw text.
+    pub structured_tree: bool,
+    pub image_fit: bool,
+    pub image_zoom: f32,
+}
+
+impl Default for PreviewViewState {
+    fn default() -> Self {
+        Self {
+            markdown_raw: false,
+            json_pretty: true,
+            structured_tree: false,
+            image_fit: true,
+            image_zoom: 1.0,
+        }
+    }
+}
+
+/// Identity of the text the shared code editor was last synced with.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct CodeSyncKey {
+    pub path: PathBuf,
+    pub variant: &'static str,
 }
 
 impl InspectorPanel {
@@ -37,55 +91,76 @@ impl InspectorPanel {
             cx.notify();
         });
 
+        // Re-render as audio plays so the transport bar / waveform advance.
+        let audio = PikuState::global(cx).audio.clone();
+        let audio_sub = cx.observe(&audio, |_, _, cx| cx.notify());
+
         Self {
             focus_handle: cx.focus_handle(),
-            preview_text: None,
-            preview_for: None,
-            _subscriptions: vec![subscription],
+            loaded: None,
+            loading_for: None,
+            generation: 0,
+            view: PreviewViewState::default(),
+            code_state: None,
+            code_synced: None,
+            tree_state: None,
+            tree_synced: None,
+            _subscriptions: vec![subscription, audio_sub],
         }
     }
 
     fn on_selection_changed(&mut self, entries: &[FsEntry], cx: &mut Context<Self>) {
-        let single_text = (entries.len() == 1 && is_text_previewable(&entries[0]))
-            .then(|| entries[0].path.clone());
+        let single_file = (entries.len() == 1 && entries[0].kind == EntryKind::File)
+            .then(|| entries[0].clone());
+        let Some(entry) = single_file else {
+            self.loaded = None;
+            self.loading_for = None;
+            return;
+        };
 
-        match single_text {
-            None => {
-                self.preview_text = None;
-                self.preview_for = None;
-            }
-            Some(path) => {
-                if self.preview_for.as_ref() == Some(&path) {
-                    return;
-                }
-                self.preview_for = Some(path.clone());
-                self.preview_text = None;
-                let load_path = path.clone();
-                let task = cx.background_executor().spawn(async move {
-                    use std::io::Read as _;
-                    // Authorize the path and read at most 4 KiB — never pull a
-                    // multi-GB file into memory to preview its head.
-                    let load_path = crate::storage::local().guard().sanitize(&load_path).ok()?;
-                    let file = std::fs::File::open(&load_path).ok()?;
-                    let mut bytes = Vec::with_capacity(4096);
-                    file.take(4096).read_to_end(&mut bytes).ok()?;
-                    Some(String::from_utf8_lossy(&bytes).into_owned())
-                });
-                cx.spawn(async move |this, cx| {
-                    let text = task.await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this.preview_for.as_ref() == Some(&path) {
-                            this.preview_text = text.map(SharedString::from);
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
+        // Minimal cache: skip the reload when the same unchanged file is
+        // re-selected; a changed mtime forces a fresh decode.
+        if self
+            .loaded
+            .as_ref()
+            .is_some_and(|l| l.path == entry.path && l.mtime == entry.modified)
+        {
+            return;
         }
+        if self.loading_for.as_ref() == Some(&entry.path) {
+            return;
+        }
+
+        self.generation += 1;
+        let generation = self.generation;
+        self.loading_for = Some(entry.path.clone());
+        self.view = PreviewViewState::default();
+
+        let kind = decide_kind(&entry);
+        let path = entry.path.clone();
+        let ext = entry.ext.clone();
+        let mtime = entry.modified;
+        let task = cx
+            .background_executor()
+            .spawn(async move { (loader::load_preview(kind, &path, &ext), path) });
+        cx.spawn(async move |this, cx| {
+            let (content, path) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.loaded = Some(LoadedPreview { path, mtime, content });
+                    this.loading_for = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
-    fn detail_row(label: &'static str, value: impl Into<SharedString>, cx: &App) -> impl IntoElement {
+    pub(super) fn detail_row(
+        label: &'static str,
+        value: impl Into<SharedString>,
+        cx: &App,
+    ) -> impl IntoElement {
         v_flex()
             .gap_0p5()
             .child(
@@ -102,44 +177,26 @@ impl InspectorPanel {
             )
     }
 
-    fn render_single(&self, entry: &FsEntry, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_single(
+        &mut self,
+        entry: &FsEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let category = categorize(entry);
         let name: SharedString = entry.name.clone().into();
         let path_text: SharedString = entry.path.display().to_string().into();
 
-        let preview: gpui::AnyElement = if is_image_previewable(entry) {
-            div()
-                .w_full()
-                .h(px(170.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(cx.theme().radius)
-                .bg(cx.theme().muted)
-                .child(
-                    img(entry.path.clone())
-                        .max_w_full()
-                        .max_h_full()
-                        .object_fit(ObjectFit::Contain)
-                        .rounded(cx.theme().radius),
-                )
-                .into_any_element()
-        } else if let Some(text) = self.preview_text.clone() {
-            div()
-                .w_full()
-                .h(px(170.))
-                .p_2()
-                .rounded(cx.theme().radius)
-                .bg(cx.theme().muted)
-                .font_family("monospace")
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .overflow_hidden()
-                .child(text)
-                .into_any_element()
-        } else if self.preview_for.as_ref() == Some(&entry.path) {
-            // Text preview still loading — same box the preview will occupy,
-            // so nothing jumps when the content arrives.
+        let has_loaded = entry.kind == EntryKind::File
+            && self.loaded.as_ref().is_some_and(|l| l.path == entry.path);
+        let is_loading = entry.kind == EntryKind::File
+            && self.loading_for.as_ref() == Some(&entry.path);
+
+        let preview: gpui::AnyElement = if has_loaded {
+            super::preview_view::render_preview_box(self, window, cx)
+        } else if is_loading {
+            // Same box the preview will occupy, so nothing jumps when the
+            // content arrives.
             div()
                 .w_full()
                 .h(px(170.))
@@ -176,6 +233,12 @@ impl InspectorPanel {
         if !entry.is_dir() {
             details = details.child(Self::detail_row("Size", format_size(entry.size), cx));
         }
+        if let Some(loaded) = &self.loaded
+            && loaded.path == entry.path
+            && let PreviewContent::Image { dimensions: Some((w, h)), .. } = &loaded.content
+        {
+            details = details.child(Self::detail_row("Dimensions", format!("{w} × {h}"), cx));
+        }
         details = details
             .child(Self::detail_row("Modified", format_time(entry.modified), cx))
             .child(Self::detail_row("Created", format_time(entry.created), cx))
@@ -193,8 +256,12 @@ impl InspectorPanel {
             details = details.child(Self::detail_row("Attributes", attributes, cx));
         }
 
+        // `w_full` (natural height) — NOT `size_full`: an `h_full` body would
+        // be pinned to the scroll viewport height, clipping tall content (e.g.
+        // rendered markdown) instead of letting the outer `overflow_y_scroll`
+        // reach the end of the document.
         v_flex()
-            .size_full()
+            .w_full()
             .gap_3()
             .p_3()
             .child(preview)
@@ -306,12 +373,12 @@ impl InspectorPanel {
 }
 
 impl Render for InspectorPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entries = PikuState::global(cx).selection.read(cx).entries.clone();
 
         let body = match entries.len() {
             0 => self.render_dir_summary(cx),
-            1 => self.render_single(&entries[0], cx),
+            1 => self.render_single(&entries[0], window, cx),
             _ => self.render_multi(&entries, cx),
         };
 
