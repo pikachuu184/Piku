@@ -41,6 +41,9 @@ pub struct AudioPlayer {
     volume: f32,
     muted: bool,
     ticking: bool,
+    /// Bumped on every `load`; an async sink build from a superseded load is
+    /// discarded when it finally arrives.
+    load_gen: u64,
 }
 
 impl AudioPlayer {
@@ -134,36 +137,60 @@ impl AudioPlayer {
         let Some(handle) = self.handle() else {
             return;
         };
-        // Reads go through the sanitizing local provider (refuses symlinks/dirs).
-        let Ok((file, total)) = crate::storage::local().open_read(&path) else {
-            return;
-        };
-        // Untrusted input: never stream an oversized file into the decoder.
-        if total > MAX_PLAY_BYTES {
-            return;
-        }
-        let Ok(decoder) = Decoder::new(BufReader::new(file)) else {
-            return;
-        };
-        let Ok(sink) = Sink::try_new(&handle) else {
-            return;
-        };
-        sink.set_volume(self.effective_volume());
-        sink.append(decoder);
-        sink.play();
-        self.sink = Some(sink);
-        // Fall back to the file name when the caller has no tag metadata.
+        // Show now-playing immediately so the bottom bar/inspector update on the
+        // click; the sink (open + decoder header probe) is built off the UI
+        // thread so a large or slow file can't stall the interface.
         self.meta = Some(meta.unwrap_or_else(|| TrackMeta {
-            title: path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string()
-                .into(),
+            title: path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string().into(),
             ..TrackMeta::default()
         }));
-        self.current = Some(path);
-        self.start_ticker(cx);
+        self.current = Some(path.clone());
+        if let Some(old) = self.sink.take() {
+            old.stop();
+        }
+        self.load_gen += 1;
+        let generation = self.load_gen;
+        let volume = self.effective_volume();
+
+        let build = cx.background_executor().spawn(async move {
+            // Reads go through the sanitizing local provider (refuses symlinks/dirs).
+            let (file, total) = crate::storage::local().open_read(&path).ok()?;
+            // Untrusted input: never stream an oversized file into the decoder.
+            if total > MAX_PLAY_BYTES {
+                return None;
+            }
+            // rodio/symphonia can *panic* (not just error) probing a malformed
+            // or unsupported stream — catch it so a bad file is a no-op, not a
+            // crash.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let decoder = Decoder::new(BufReader::new(file)).ok()?;
+                let sink = Sink::try_new(&handle).ok()?;
+                sink.set_volume(volume);
+                sink.append(decoder);
+                Some(sink)
+            }))
+            .ok()
+            .flatten()
+        });
+        cx.spawn(async move |this, cx| {
+            let sink = build.await;
+            let _ = this.update(cx, |this, cx| {
+                // A newer load superseded this one — drop the stale sink.
+                if this.load_gen != generation {
+                    if let Some(sink) = sink {
+                        sink.stop();
+                    }
+                    return;
+                }
+                if let Some(sink) = sink {
+                    sink.play();
+                    this.sink = Some(sink);
+                    this.start_ticker(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 

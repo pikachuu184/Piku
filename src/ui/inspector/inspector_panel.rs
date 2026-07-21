@@ -4,6 +4,7 @@
 //! plus a (path, mtime) key guard against stale results and double loads.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use gpui::{
@@ -23,6 +24,7 @@ use crate::core::file_type::categorize;
 use crate::core::format::{format_size, format_time};
 use crate::preview::content::PreviewContent;
 use crate::preview::{decide_kind, loader};
+use crate::services::preview_cache::PreviewKey;
 use crate::state::PikuState;
 use crate::ui::components::{category_icon, empty_state};
 
@@ -50,7 +52,8 @@ pub struct InspectorPanel {
 pub(super) struct LoadedPreview {
     pub path: PathBuf,
     pub mtime: Option<SystemTime>,
-    pub content: PreviewContent,
+    /// `Arc` so a cache hit hands over the shared decoded payload without a copy.
+    pub content: Arc<PreviewContent>,
 }
 
 pub(super) struct PreviewViewState {
@@ -133,19 +136,35 @@ impl InspectorPanel {
 
         self.generation += 1;
         let generation = self.generation;
-        self.loading_for = Some(entry.path.clone());
         self.view = PreviewViewState::default();
 
         let kind = decide_kind(&entry);
         let path = entry.path.clone();
         let ext = entry.ext.clone();
         let mtime = entry.modified;
+        let key = PreviewKey::new(path.clone(), mtime, entry.size);
+
+        // Cache hit: the decoded preview for this exact (path, mtime, size) is
+        // already resident — hand it over immediately, no decode, no spinner.
+        let cache = PikuState::global(cx).preview_cache.clone();
+        if let Some(content) = cache.update(cx, |c, _| c.get(&key)) {
+            self.loaded = Some(LoadedPreview { path, mtime, content });
+            self.loading_for = None;
+            return;
+        }
+
+        self.loading_for = Some(entry.path.clone());
         let task = cx
             .background_executor()
             .spawn(async move { (loader::load_preview(kind, &path, &ext), path) });
         cx.spawn(async move |this, cx| {
             let (content, path) = task.await;
+            let content = Arc::new(content);
             let _ = this.update(cx, |this, cx| {
+                // Populate the shared cache regardless of staleness, so the work
+                // is not wasted even if the selection moved on mid-decode.
+                let cache = PikuState::global(cx).preview_cache.clone();
+                cache.update(cx, |c, _| c.insert(key, content.clone()));
                 if this.generation == generation {
                     this.loaded = Some(LoadedPreview { path, mtime, content });
                     this.loading_for = None;
@@ -235,7 +254,7 @@ impl InspectorPanel {
         }
         if let Some(loaded) = &self.loaded
             && loaded.path == entry.path
-            && let PreviewContent::Image { dimensions: Some((w, h)), .. } = &loaded.content
+            && let PreviewContent::Image { dimensions: Some((w, h)), .. } = &*loaded.content
         {
             details = details.child(Self::detail_row("Dimensions", format!("{w} × {h}"), cx));
         }

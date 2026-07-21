@@ -77,6 +77,12 @@ pub enum PikuIcon {
     Braces,
     ExternalLink,
     Maximize2,
+    // Video-player controls.
+    StepBack,
+    StepForward,
+    Camera,
+    Gauge,
+    Minimize,
 }
 
 impl IconNamed for PikuIcon {
@@ -121,6 +127,11 @@ impl IconNamed for PikuIcon {
             Self::Braces => "icons/piku/braces.svg",
             Self::ExternalLink => "icons/piku/external-link.svg",
             Self::Maximize2 => "icons/piku/maximize-2.svg",
+            Self::StepBack => "icons/piku/step-back.svg",
+            Self::StepForward => "icons/piku/step-forward.svg",
+            Self::Camera => "icons/piku/camera.svg",
+            Self::Gauge => "icons/piku/gauge.svg",
+            Self::Minimize => "icons/piku/minimize.svg",
         }
         .into()
     }

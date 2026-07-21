@@ -8,10 +8,10 @@
 
 use std::io::{BufReader, Read as _};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{RenderImage, SharedString};
 
@@ -40,12 +40,23 @@ pub fn poster_frame(path: &Path, target: Option<u32>) -> Option<Arc<RenderImage>
         return None;
     }
     let mut cmd = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
-    cmd.args(["-nostdin", "-loglevel", "error", "-ss", "1", "-i"])
-        .arg(path)
-        .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    // `-protocol_whitelist file,crypto`: a crafted container must not be able to
+    // make ffmpeg reach out to a remote URL (SSRF) — only local file access.
+    cmd.args([
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-protocol_whitelist",
+        "file,crypto",
+        "-ss",
+        "1",
+        "-i",
+    ])
+    .arg(path)
+    .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
@@ -62,6 +73,108 @@ pub fn poster_frame(path: &Path, target: Option<u32>) -> Option<Arc<RenderImage>
         None => decoded.into_rgba8(),
     };
     Some(render_image_from_rgba(rgba))
+}
+
+/// Grab the frame at `at_ms` as a PNG and write it into the app-managed
+/// screenshot cache dir (restrictive per-user location), returning the path.
+/// Decoupled from live playback so a screenshot always works. Blocking —
+/// background executor only; same subprocess hardening as [`poster_frame`].
+pub fn save_frame_png(path: &Path, at_ms: u64) -> Option<PathBuf> {
+    if !ffmpeg_available() {
+        return None;
+    }
+    let mut cmd = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
+    cmd.args([
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-protocol_whitelist",
+        "file,crypto",
+        "-ss",
+        &format!("{:.3}", at_ms as f64 / 1000.0),
+        "-i",
+    ])
+    .arg(path)
+    .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+
+    let png = run_capture(cmd)?;
+    if png.is_empty() {
+        return None;
+    }
+    let dir = dirs::cache_dir()?.join("piku").join("screenshots");
+    std::fs::create_dir_all(&dir).ok()?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis();
+    let dest = dir.join(format!("{stem}-{ts}.png"));
+    std::fs::write(&dest, &png).ok()?;
+    Some(dest)
+}
+
+/// Peak waveform (0..1, normalized, `buckets` bars) decoded via the bundled
+/// ffmpeg — the fallback for formats `rodio` cannot decode. ffmpeg downmixes to
+/// 8 kHz mono `s16le` on stdout (tiny: ~16 KB/s), which we bucket by abs-max.
+/// Returns `None` when ffmpeg is unavailable or produced nothing. Blocking —
+/// background executor only; same hardening as [`poster_frame`].
+pub fn audio_pcm_peaks(path: &Path, buckets: usize) -> Option<Vec<f32>> {
+    if !ffmpeg_available() || buckets == 0 {
+        return None;
+    }
+    let mut cmd = Command::new(ffmpeg_sidecar::paths::ffmpeg_path());
+    cmd.args([
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-protocol_whitelist",
+        "file,crypto",
+        "-i",
+    ])
+    .arg(path)
+    .args(["-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+
+    let pcm = run_capture(cmd)?;
+    let n = pcm.len() / 2;
+    if n == 0 {
+        return None;
+    }
+    let mut peaks = vec![0f32; buckets];
+    for (b, peak) in peaks.iter_mut().enumerate() {
+        let lo = (b * n) / buckets;
+        let hi = (((b + 1) * n) / buckets).max(lo + 1).min(n);
+        let mut max = 0f32;
+        for i in lo..hi {
+            let s = i16::from_le_bytes([pcm[2 * i], pcm[2 * i + 1]]);
+            let amp = (s as f32).abs() / 32768.0;
+            if amp > max {
+                max = amp;
+            }
+        }
+        *peak = max;
+    }
+    let overall = peaks.iter().copied().fold(0.0f32, f32::max);
+    if overall > 0.0 {
+        for peak in peaks.iter_mut() {
+            *peak /= overall;
+        }
+        Some(peaks)
+    } else {
+        None
+    }
 }
 
 /// Spawn `cmd`, reading its stdout on a helper thread (so a full pipe never

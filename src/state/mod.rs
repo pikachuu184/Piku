@@ -13,6 +13,7 @@ use crate::core::entry::FsEntry;
 use crate::services::audio_player::AudioPlayer;
 use crate::services::drive_scan::DriveStatsStore;
 use crate::services::jobs::JobQueue;
+use crate::services::preview_cache::PreviewCache;
 use crate::services::thumbnails::ThumbnailCache;
 use crate::state::nav_model::NavModel;
 use crate::state::settings::Settings;
@@ -45,6 +46,9 @@ pub struct PikuState {
     pub selection: Entity<SelectionCtx>,
     pub drive_stats: Entity<DriveStatsStore>,
     pub thumbnails: Entity<ThumbnailCache>,
+    /// Decoded-preview cache shared by the inspector and the media panel, so
+    /// re-opening a file already previewed is instant instead of re-decoding.
+    pub preview_cache: Entity<PreviewCache>,
     pub audio: Entity<AudioPlayer>,
     active_explorer: RefCell<Option<WeakEntity<ExplorerPanel>>>,
     nav_panel: RefCell<Option<WeakEntity<NavPanel>>>,
@@ -64,6 +68,7 @@ impl PikuState {
         let selection = cx.new(|_| SelectionCtx::default());
         let drive_stats = cx.new(|_| DriveStatsStore::load());
         let thumbnails = cx.new(|_| ThumbnailCache::default());
+        let preview_cache = cx.new(|_| PreviewCache::default());
         let audio = cx.new(|_| AudioPlayer::new());
         cx.set_global(Self {
             settings,
@@ -74,6 +79,7 @@ impl PikuState {
             selection,
             drive_stats,
             thumbnails,
+            preview_cache,
             audio,
             active_explorer: RefCell::new(None),
             nav_panel: RefCell::new(None),

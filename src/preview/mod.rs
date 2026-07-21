@@ -29,6 +29,8 @@ pub const ARCHIVE_ENTRY_CAP: usize = 1_000;
 /// anything larger than this so a pathological input can't burn the background
 /// executor (the metadata rows still render; the scrubber just has no peaks).
 pub const AUDIO_WAVEFORM_MAX_BYTES: u64 = 300 * 1024 * 1024;
+/// Number of bars in the preview waveform / scrubber envelope.
+pub const WAVEFORM_BUCKETS: usize = 240;
 /// Only the (future) rotation path decodes pixels on our side; refuse
 /// anything bigger than this outright.
 #[allow(dead_code)]

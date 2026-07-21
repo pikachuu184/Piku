@@ -8,12 +8,12 @@
 //! your player" button.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, EventEmitter, FocusHandle, Focusable, ImageSource,
-    InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window, div, img,
-    px,
+    AnyElement, App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon,
@@ -24,17 +24,22 @@ use gpui_component::{
 
 use crate::app::assets::PikuIcon;
 use crate::preview::content::PreviewContent;
-use crate::preview::{kind_for_path, loader};
+use crate::preview::{PreviewKind, kind_for_path, loader};
+use crate::services::preview_cache::PreviewKey;
 use crate::state::PikuState;
+use crate::ui::media::VideoView;
 use crate::ui::media::transport;
 
 pub struct MediaPanel {
     focus_handle: FocusHandle,
     path: Option<PathBuf>,
-    loaded: Option<PreviewContent>,
+    loaded: Option<Arc<PreviewContent>>,
     loading: bool,
     /// Staleness guard: a slow decode from an earlier file is dropped.
     generation: u64,
+    /// In-app video player, created when a video file is opened (its own decode
+    /// pipeline; the `loaded` content only supplies the metadata rows).
+    video: Option<gpui::Entity<VideoView>>,
     _audio: Subscription,
 }
 
@@ -51,6 +56,7 @@ impl MediaPanel {
             loaded: None,
             loading: false,
             generation: 0,
+            video: None,
             _audio: audio_sub,
         }
     }
@@ -69,10 +75,28 @@ impl MediaPanel {
         }
         self.path = Some(path.clone());
         self.loaded = None;
-        self.loading = true;
         self.generation += 1;
         let generation = self.generation;
 
+        // Spin up (or tear down) the in-app video player. Dropping the old one
+        // stops its decode thread; a new one begins buffering immediately.
+        self.video = matches!(kind_for_path(&path), PreviewKind::VideoMeta)
+            .then(|| cx.new(|cx| VideoView::new(path.clone(), cx)));
+
+        // Cache hit: reuse the decoded payload the inspector (or a previous
+        // open) already produced — no re-decode, no ffmpeg re-spawn.
+        let key = PreviewKey::for_path(&path);
+        let cache = PikuState::global(cx).preview_cache.clone();
+        if let Some(key) = &key
+            && let Some(content) = cache.update(cx, |c, _| c.get(key))
+        {
+            self.loaded = Some(content);
+            self.loading = false;
+            cx.notify();
+            return;
+        }
+
+        self.loading = true;
         let kind = kind_for_path(&path);
         let ext = path
             .extension()
@@ -83,8 +107,12 @@ impl MediaPanel {
             .background_executor()
             .spawn(async move { loader::load_preview(kind, &path, &ext) });
         cx.spawn(async move |this, cx| {
-            let content = task.await;
+            let content = Arc::new(task.await);
             let _ = this.update(cx, |this, cx| {
+                if let Some(key) = key {
+                    let cache = PikuState::global(cx).preview_cache.clone();
+                    cache.update(cx, |c, _| c.insert(key, content.clone()));
+                }
                 if this.generation == generation {
                     this.loaded = Some(content);
                     this.loading = false;
@@ -115,7 +143,7 @@ impl MediaPanel {
         // `take`/put-back so the content can be read while `self`/`cx` are
         // borrowed mutably by the transport widgets.
         let content = self.loaded.take();
-        let element = match &content {
+        let element = match content.as_deref() {
             Some(PreviewContent::Audio { rows, waveform, duration_ms }) => {
                 let meta = transport::track_meta_from(&path, rows, *duration_ms);
                 v_flex()
@@ -128,13 +156,15 @@ impl MediaPanel {
                     .child(rows_block(rows, cx))
                     .into_any_element()
             }
-            Some(PreviewContent::Video { rows, poster }) => {
+            Some(PreviewContent::Video { rows, .. }) => {
                 let open_path = path.clone();
                 let mut column = v_flex().w_full().gap_3();
-                column = match poster {
-                    Some(image) => column.child(poster_view(cx, image.clone(), 320.)),
-                    None => column.child(artwork(cx, PikuIcon::Film, 200.)),
-                };
+                // The in-app player (created in `open`); falls back to a poster
+                // tile if it somehow wasn't set up.
+                match &self.video {
+                    Some(video) => column = column.child(video.clone()),
+                    None => column = column.child(artwork(cx, PikuIcon::Film, 200.)),
+                }
                 column
                     .child(
                         Button::new("mp-video-open")
@@ -187,29 +217,6 @@ fn artwork(cx: &Context<MediaPanel>, icon: PikuIcon, height: f32) -> AnyElement 
         .into_any_element()
 }
 
-fn poster_view(
-    cx: &Context<MediaPanel>,
-    image: std::sync::Arc<gpui::RenderImage>,
-    height: f32,
-) -> AnyElement {
-    div()
-        .relative()
-        .w_full()
-        .h(px(height))
-        .rounded(cx.theme().radius)
-        .bg(cx.theme().muted)
-        .overflow_hidden()
-        .child(
-            div().absolute().inset_0().flex().items_center().justify_center().child(
-                img(ImageSource::Render(image))
-                    .max_w_full()
-                    .max_h_full()
-                    .object_fit(ObjectFit::Contain),
-            ),
-        )
-        .into_any_element()
-}
-
 fn message(cx: &Context<MediaPanel>, text: &str) -> AnyElement {
     div()
         .w_full()
@@ -254,7 +261,7 @@ impl Panel for MediaPanel {
 
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_video =
-            matches!(self.loaded, Some(PreviewContent::Video { .. }))
+            matches!(self.loaded.as_deref(), Some(PreviewContent::Video { .. }))
                 || self.path.as_ref().is_some_and(|p| {
                     matches!(kind_for_path(p), crate::preview::PreviewKind::VideoMeta)
                 });

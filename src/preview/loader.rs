@@ -18,7 +18,7 @@ use crate::preview::language::language_for_ext;
 use crate::preview::sniff;
 use crate::preview::{
     ARCHIVE_ENTRY_CAP, AUDIO_WAVEFORM_MAX_BYTES, CODE_HEAD_CAP, HEX_CAP, IMAGE_MAX_PIXELS,
-    MARKDOWN_CAP, PreviewKind, STRUCTURED_CAP,
+    MARKDOWN_CAP, PreviewKind, STRUCTURED_CAP, WAVEFORM_BUCKETS,
 };
 use crate::storage::provider::StorageProvider as _;
 
@@ -204,7 +204,18 @@ fn load_audio_meta(path: &Path) -> PreviewContent {
     // Untrusted input: only re-decode the whole file for peaks when it is
     // within the size cap; otherwise the scrubber renders without a waveform.
     let waveform = if total <= AUDIO_WAVEFORM_MAX_BYTES {
-        audio_waveform(path, seconds)
+        let mut peaks = audio_waveform(path);
+        // rodio/symphonia can't decode every format lofty can still tag (some
+        // WMA/AAC). When it yields nothing, fall back to the bundled ffmpeg,
+        // which decodes far more — so the waveform still displays.
+        if peaks.iter().all(|p| *p <= 0.0) {
+            if let Some(fallback) =
+                crate::services::video_probe::audio_pcm_peaks(path, WAVEFORM_BUCKETS)
+            {
+                peaks = fallback;
+            }
+        }
+        peaks
     } else {
         Vec::new()
     };
@@ -216,13 +227,21 @@ fn load_audio_meta(path: &Path) -> PreviewContent {
 }
 
 /// Coarse peak waveform (0..1, normalized) for the transport display. Decodes
-/// the whole file on the background executor, taking the abs-max per bucket;
-/// capped so a pathological input can't spin forever. Failure → empty (the UI
-/// just shows the bar without peaks).
-fn audio_waveform(path: &Path, duration_secs: u64) -> Vec<f32> {
+/// the whole file on the background executor, building a max-amplitude envelope
+/// that self-coarsens as it grows — so it needs **no** up-front length estimate
+/// and a missing/zero duration can't collapse every sample into one bucket
+/// (the previous bug). Capped so a pathological input can't spin forever.
+/// Failure → empty (the caller then tries the ffmpeg fallback). rodio/symphonia
+/// can *panic* on a malformed stream, so the decode runs inside `catch_unwind`
+/// and a panic degrades to an empty waveform (then the ffmpeg fallback).
+fn audio_waveform(path: &Path) -> Vec<f32> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| audio_waveform_decode(path)))
+        .unwrap_or_default()
+}
+
+fn audio_waveform_decode(path: &Path) -> Vec<f32> {
     use rodio::Source as _;
 
-    const BUCKETS: usize = 240;
     const MAX_SAMPLES: u64 = 60_000_000;
 
     let Ok((file, _)) = crate::storage::local().open_read(path) else {
@@ -233,21 +252,61 @@ fn audio_waveform(path: &Path, duration_secs: u64) -> Vec<f32> {
     };
     let channels = u64::from(decoder.channels().max(1));
     let sample_rate = u64::from(decoder.sample_rate().max(1));
-    let est_total = duration_secs.max(1) * sample_rate * channels;
-    let per_bucket = (est_total / BUCKETS as u64).max(1);
+    // Start at ~100 envelope points/sec; the envelope halves (and the stride
+    // doubles) whenever it gets too long, keeping memory bounded for any length.
+    let mut stride = ((sample_rate * channels) / 100).max(1);
 
-    let mut peaks = vec![0f32; BUCKETS];
+    let mut env: Vec<f32> = Vec::with_capacity(WAVEFORM_BUCKETS * 8);
+    let mut cur = 0f32;
+    let mut in_window: u64 = 0;
     let mut idx: u64 = 0;
     for sample in decoder {
-        let amp = (f32::from(sample)).abs() / 32768.0;
-        let bucket = ((idx / per_bucket) as usize).min(BUCKETS - 1);
-        if amp > peaks[bucket] {
-            peaks[bucket] = amp;
+        let amp = f32::from(sample).abs() / 32768.0;
+        if amp > cur {
+            cur = amp;
+        }
+        in_window += 1;
+        if in_window >= stride {
+            env.push(cur);
+            cur = 0.0;
+            in_window = 0;
+            if env.len() >= WAVEFORM_BUCKETS * 8 {
+                env = halve_envelope(&env);
+                stride *= 2;
+            }
         }
         idx += 1;
         if idx >= MAX_SAMPLES {
             break;
         }
+    }
+    if in_window > 0 {
+        env.push(cur);
+    }
+    resample_peaks(&env, WAVEFORM_BUCKETS)
+}
+
+/// Merge adjacent envelope points by their max, halving the length. Used to
+/// keep the growing envelope bounded without losing peak information.
+fn halve_envelope(env: &[f32]) -> Vec<f32> {
+    env.chunks(2)
+        .map(|pair| pair.iter().copied().fold(0.0f32, f32::max))
+        .collect()
+}
+
+/// Resample an arbitrary-length max-envelope to exactly `buckets` bars (taking
+/// the max over each source range so peaks survive), then normalize to 0..1.
+/// Handles both `env.len() < buckets` (stretch) and `> buckets` (downsample).
+fn resample_peaks(env: &[f32], buckets: usize) -> Vec<f32> {
+    let n = env.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut peaks = vec![0f32; buckets];
+    for (b, peak) in peaks.iter_mut().enumerate() {
+        let lo = (b * n) / buckets;
+        let hi = (((b + 1) * n) / buckets).max(lo + 1).min(n);
+        *peak = env[lo..hi].iter().copied().fold(0.0f32, f32::max);
     }
     let max = peaks.iter().copied().fold(0.0f32, f32::max);
     if max > 0.0 {
@@ -382,6 +441,39 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resample_spreads_peaks_across_all_buckets() {
+        // A short envelope (fewer points than buckets) must stretch to fill
+        // every bar — the zero-duration bug collapsed everything into one.
+        let env = vec![0.2, 0.8, 0.4, 1.0];
+        let peaks = resample_peaks(&env, 240);
+        assert_eq!(peaks.len(), 240);
+        // Normalized: the loudest source point becomes 1.0 somewhere.
+        assert!((peaks.iter().copied().fold(0.0f32, f32::max) - 1.0).abs() < 1e-6);
+        // Not all energy piled into the final bucket.
+        assert!(peaks[..120].iter().any(|p| *p > 0.0));
+    }
+
+    #[test]
+    fn resample_downsamples_keeping_peaks() {
+        // A long envelope with one spike must keep that spike after downsample.
+        let mut env = vec![0.1f32; 2000];
+        env[1000] = 1.0;
+        let peaks = resample_peaks(&env, 240);
+        assert_eq!(peaks.len(), 240);
+        assert!((peaks.iter().copied().fold(0.0f32, f32::max) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn halve_envelope_takes_pairwise_max() {
+        assert_eq!(halve_envelope(&[0.1, 0.9, 0.5, 0.2, 0.7]), vec![0.9, 0.5, 0.7]);
+    }
+
+    #[test]
+    fn resample_empty_is_empty() {
+        assert!(resample_peaks(&[], 240).is_empty());
     }
 
     #[test]

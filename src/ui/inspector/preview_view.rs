@@ -46,7 +46,7 @@ pub(super) fn render_preview_box(
     let Some(loaded) = panel.loaded.take() else {
         return div().into_any_element();
     };
-    let element = match &loaded.content {
+    let element = match &*loaded.content {
         PreviewContent::Image { path, dimensions } => {
             image_block(panel, path, *dimensions, cx)
         }

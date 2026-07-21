@@ -6,6 +6,8 @@
 pub mod bar;
 pub mod media_panel;
 pub mod transport;
+pub mod video_view;
 
 pub use bar::MediaBar;
 pub use media_panel::MediaPanel;
+pub use video_view::VideoView;

@@ -300,7 +300,11 @@ pub fn scrubber<V: 'static>(
 ) -> impl IntoElement {
     let peaks = waveform.to_vec();
     let played = cx.theme().foreground;
-    let rest = cx.theme().border;
+    // Unplayed bars use `muted_foreground`, not `border`: on the `muted`
+    // scrubber background `border` is only ~12/255 brighter and reads as
+    // invisible until the played color sweeps over it (this was the "waveform
+    // not displaying" bug). `muted_foreground` is a legible mid-gray.
+    let rest = cx.theme().muted_foreground;
 
     let cell: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
     let (store, down, mv) = (cell.clone(), cell.clone(), cell);
