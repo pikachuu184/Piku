@@ -2,6 +2,10 @@
   <img src="assets/branding/logo.svg" width="140" alt="PIKU logo">
 </p>
 
+<p align="center">
+  <img src="assets/branding/Screenshot%20(13).png" width="900" alt="PIKU application screenshot">
+</p>
+
 <h1 align="center">PIKU</h1>
 
 <p align="center">
