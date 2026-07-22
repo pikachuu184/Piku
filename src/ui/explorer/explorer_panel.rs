@@ -200,6 +200,10 @@ impl ExplorerPanel {
         let thumbnails = PikuState::global(cx).thumbnails.clone();
         subscriptions.push(cx.observe(&thumbnails, |_, _, cx| cx.notify()));
 
+        // Re-render when git status lands so file rows pick up their badges.
+        let git = PikuState::global(cx).git.clone();
+        subscriptions.push(cx.observe(&git, |_, _, cx| cx.notify()));
+
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             session,
@@ -365,6 +369,13 @@ impl ExplorerPanel {
                             }
                         }
                         this.start_watch(window, cx);
+                        // Passive git discovery: the store caches negative
+                        // results, so this is a no-op for non-repo folders.
+                        let cwd = this.session.cwd.clone();
+                        PikuState::global(cx)
+                            .git
+                            .clone()
+                            .update(cx, |git, cx| git.note_dir(cwd, cx));
                     }
                     Err(error) => {
                         this.error = Some(format!("{error:#}"));
@@ -1326,17 +1337,41 @@ impl Panel for ExplorerPanel {
             .child(self.tab_title())
     }
 
-    /// Pin/search badges after the tab label. Kept cheap — this runs on every
-    /// tab render.
+    /// Pin/search/branch badges after the tab label. Kept cheap — this runs
+    /// on every tab render (branch lookup is two HashMap reads).
     fn title_suffix(
         &mut self,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        if !self.session.pinned && !self.searching {
+        // Active branch of the repository this pane is inside, if any —
+        // "the active branch appears inside repository tabs".
+        let branch: Option<String> = {
+            let git = PikuState::global(cx).git.read(cx);
+            git.root_for(&self.session.cwd)
+                .and_then(|root| git.snapshot(root))
+                .and_then(|snap| snap.branch.clone())
+        };
+        if !self.session.pinned && !self.searching && branch.is_none() {
             return None;
         }
         let mut row = h_flex().gap_0p5().items_center().ml_1();
+        if let Some(branch) = branch {
+            row = row
+                .child(
+                    Icon::new(PikuIcon::GitBranch)
+                        .size(gpui::px(11.))
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .max_w(gpui::px(90.))
+                        .truncate()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(branch),
+                );
+        }
         if self.session.pinned {
             row = row.child(
                 Icon::new(PikuIcon::Pin)

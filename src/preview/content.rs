@@ -60,6 +60,12 @@ pub enum PreviewContent {
         signature: Option<&'static str>,
         total_size: u64,
     },
+    /// A textual git diff between two revisions of one file. Hunk headers
+    /// and lines arrive pre-sanitized and capped from the git backend. The
+    /// git inspector renders diffs through the same `diff_block` renderer;
+    /// this variant is the seam for historical-revision previews.
+    #[allow(dead_code)]
+    Diff(crate::services::git::types::DiffPayload),
     TooLarge {
         size: u64,
     },

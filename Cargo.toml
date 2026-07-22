@@ -14,6 +14,17 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a", features = ["tree-sitter", "tree-sitter-languages"] }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 
+# Git backend: pure-Rust gitoxide — no C libgit2, no shelling out to git.exe.
+# Defaults are curated (status, blob-diff, index, revision, attributes,
+# credentials, worktree-mutation, zlib-rs). Added: blocking HTTPS fetch via
+# reqwest+schannel (OS TLS, no C build) and tree-editor for commit creation.
+# NOT enabled on purpose: max-performance (pulls zlib-ng/C).
+gix = { version = "0.85", features = [
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-native-tls",
+    "tree-editor",
+] }
+
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

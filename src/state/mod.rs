@@ -12,6 +12,7 @@ use gpui::{App, AppContext as _, Entity, Global, WeakEntity};
 use crate::core::entry::FsEntry;
 use crate::services::audio_player::AudioPlayer;
 use crate::services::drive_scan::DriveStatsStore;
+use crate::services::git::store::GitStore;
 use crate::services::jobs::JobQueue;
 use crate::services::preview_cache::PreviewCache;
 use crate::services::thumbnails::ThumbnailCache;
@@ -50,6 +51,9 @@ pub struct PikuState {
     /// re-opening a file already previewed is instant instead of re-decoding.
     pub preview_cache: Entity<PreviewCache>,
     pub audio: Entity<AudioPlayer>,
+    /// Passive git repository monitoring; panes report visited directories
+    /// and every git-aware view observes this entity.
+    pub git: Entity<GitStore>,
     active_explorer: RefCell<Option<WeakEntity<ExplorerPanel>>>,
     nav_panel: RefCell<Option<WeakEntity<NavPanel>>>,
 }
@@ -70,6 +74,7 @@ impl PikuState {
         let thumbnails = cx.new(|_| ThumbnailCache::default());
         let preview_cache = cx.new(|_| PreviewCache::default());
         let audio = cx.new(|_| AudioPlayer::new());
+        let git = cx.new(|_| GitStore::new());
         cx.set_global(Self {
             settings,
             workspaces,
@@ -81,6 +86,7 @@ impl PikuState {
             thumbnails,
             preview_cache,
             audio,
+            git,
             active_explorer: RefCell::new(None),
             nav_panel: RefCell::new(None),
         });

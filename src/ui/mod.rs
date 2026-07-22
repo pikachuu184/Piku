@@ -1,5 +1,6 @@
 pub mod components;
 pub mod explorer;
+pub mod git;
 pub mod inspector;
 pub mod media;
 pub mod shell;

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
     IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
@@ -46,7 +47,18 @@ pub struct InspectorPanel {
     pub(super) tree_state: Option<Entity<gpui_component::tree::TreeState>>,
     /// Which file the tree currently holds, to avoid rebuilding on every render.
     pub(super) tree_synced: Option<PathBuf>,
+    /// Details vs. Git mode (ephemeral, only offered inside a repository).
+    pub(super) mode: InspectorMode,
+    /// State backing the Git mode (commits, expanded detail, file history).
+    pub(super) git: super::git_view::GitViewState,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum InspectorMode {
+    #[default]
+    Details,
+    Git,
 }
 
 pub(super) struct LoadedPreview {
@@ -98,6 +110,10 @@ impl InspectorPanel {
         let audio = PikuState::global(cx).audio.clone();
         let audio_sub = cx.observe(&audio, |_, _, cx| cx.notify());
 
+        // Re-render when repository state changes (branch, status counts).
+        let git = PikuState::global(cx).git.clone();
+        let git_sub = cx.observe(&git, |_, _, cx| cx.notify());
+
         Self {
             focus_handle: cx.focus_handle(),
             loaded: None,
@@ -108,7 +124,9 @@ impl InspectorPanel {
             code_synced: None,
             tree_state: None,
             tree_synced: None,
-            _subscriptions: vec![subscription, audio_sub],
+            mode: InspectorMode::default(),
+            git: super::git_view::GitViewState::default(),
+            _subscriptions: vec![subscription, audio_sub, git_sub],
         }
     }
 
@@ -391,26 +409,97 @@ impl InspectorPanel {
     }
 }
 
+impl InspectorPanel {
+    /// The repository containing the active pane's directory, when known.
+    pub(super) fn repo_root(&self, cx: &App) -> Option<PathBuf> {
+        let selection = PikuState::global(cx).selection.read(cx);
+        let dir = selection.dir.as_deref()?;
+        PikuState::global(cx)
+            .git
+            .read(cx)
+            .root_for(dir)
+            .map(|root| root.to_path_buf())
+    }
+
+    /// Details ⇄ Git segmented toggle, shown only inside a repository.
+    fn render_mode_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let segment = |label: &'static str,
+                       icon: gpui_component::Icon,
+                       mode: InspectorMode,
+                       active: bool| {
+            gpui_component::h_flex()
+                .id(label)
+                .px_2()
+                .py_0p5()
+                .gap_1()
+                .items_center()
+                .text_xs()
+                .rounded(cx.theme().radius)
+                .cursor_pointer()
+                .when(active, |s| {
+                    s.bg(cx.theme().list_active).text_color(cx.theme().foreground)
+                })
+                .when(!active, |s| {
+                    s.text_color(cx.theme().muted_foreground)
+                        .hover(|s| s.bg(cx.theme().list_hover))
+                })
+                .child(icon.size(px(12.)))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.mode = mode;
+                    cx.notify();
+                }))
+        };
+        gpui_component::h_flex()
+            .gap_1()
+            .px_3()
+            .pt_2()
+            .child(segment(
+                "Details",
+                Icon::new(IconName::Info),
+                InspectorMode::Details,
+                self.mode == InspectorMode::Details,
+            ))
+            .child(segment(
+                "Git",
+                Icon::new(crate::app::assets::PikuIcon::GitBranch),
+                InspectorMode::Git,
+                self.mode == InspectorMode::Git,
+            ))
+    }
+}
+
 impl Render for InspectorPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entries = PikuState::global(cx).selection.read(cx).entries.clone();
+        let in_repo = self.repo_root(cx).is_some();
+        // Leaving every repository resets the toggle; re-entering one starts
+        // from Details rather than a stale Git mode.
+        if !in_repo {
+            self.mode = InspectorMode::Details;
+        }
 
-        let body = match entries.len() {
-            0 => self.render_dir_summary(cx),
-            1 => self.render_single(&entries[0], window, cx),
-            _ => self.render_multi(&entries, cx),
+        let body = if in_repo && self.mode == InspectorMode::Git {
+            super::git_view::render_git(self, window, cx)
+        } else {
+            match entries.len() {
+                0 => self.render_dir_summary(cx),
+                1 => self.render_single(&entries[0], window, cx),
+                _ => self.render_multi(&entries, cx),
+            }
         };
 
-        v_flex()
-            .size_full()
-            .bg(cx.theme().sidebar)
-            .child(
-                div()
-                    .id("inspector-scroll")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .child(body),
-            )
+        let mut root = v_flex().size_full().bg(cx.theme().sidebar);
+        if in_repo {
+            root = root.child(self.render_mode_toggle(cx));
+        }
+        root.child(
+            div()
+                .id("inspector-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .child(body),
+        )
     }
 }
 

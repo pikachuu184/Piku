@@ -12,6 +12,7 @@ pub enum JobKind {
     Rename,
     NewFolder,
     NewFile,
+    GitFetch,
 }
 
 impl JobKind {
@@ -23,6 +24,7 @@ impl JobKind {
             Self::Rename => "Renaming",
             Self::NewFolder => "Creating folder",
             Self::NewFile => "Creating file",
+            Self::GitFetch => "Fetching",
         }
     }
 }
@@ -38,7 +40,6 @@ pub enum JobStatus {
 #[derive(Clone, Debug)]
 pub struct Job {
     pub id: u64,
-    #[allow(dead_code)]
     pub kind: JobKind,
     pub title: String,
     pub total_bytes: u64,

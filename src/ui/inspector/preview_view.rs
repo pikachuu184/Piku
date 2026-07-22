@@ -79,7 +79,7 @@ pub(super) fn render_preview_box(
             video_block(&loaded.path, rows, poster.clone(), cx)
         }
         PreviewContent::Pdf { pages, total_pages, note } => {
-            pdf_block(pages, *total_pages, note.as_ref(), cx)
+            pdf_block(pages, *total_pages, note.as_ref(), window, cx)
         }
         PreviewContent::Hex { rows, signature, total_size } => {
             hex_block(rows, *signature, *total_size, cx)
@@ -88,6 +88,7 @@ pub(super) fn render_preview_box(
             format!("Too large to preview ({})", format_size(*size)),
             cx,
         ),
+        PreviewContent::Diff(payload) => diff_block(payload, cx),
         PreviewContent::Error(message) => message_box(message.to_string(), cx),
     };
     panel.loaded = Some(loaded);
@@ -95,6 +96,15 @@ pub(super) fn render_preview_box(
 }
 
 // -- Code / text ------------------------------------------------------------
+
+/// Height for "reading surfaces" (code, structured trees, PDFs, hex): fill
+/// the inspector's visible area instead of a small fixed box, so documents
+/// read at full height. Derived from the window because the preview sits in
+/// a natural-height scroll column; the floor keeps tiny windows usable.
+/// (Chrome overhead: title bar + mode toggle + paddings + status bar.)
+fn fill_height(window: &Window) -> gpui::Pixels {
+    (window.viewport_size().height - px(180.)).max(px(320.))
+}
 
 /// Lazily create the shared read-only code editor and sync it with `text`
 /// when the (path, variant) key changed since the last render.
@@ -130,7 +140,7 @@ fn code_editor_block(
 
     div()
         .w_full()
-        .h(px(320.))
+        .h(fill_height(window))
         .rounded(cx.theme().radius)
         .overflow_hidden()
         .child(Input::new(&state).disabled(true).h_full().w_full())
@@ -263,7 +273,7 @@ fn structured_block(
 
     if tree_active {
         return column
-            .child(structured_tree_block(panel, path, text, &ext, cx))
+            .child(structured_tree_block(panel, path, text, &ext, window, cx))
             .into_any_element();
     }
 
@@ -294,6 +304,7 @@ fn structured_tree_block(
     path: &Path,
     text: &SharedString,
     ext: &str,
+    window: &Window,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
     // Rebuild only when the file changed, so expand/collapse state survives
@@ -321,7 +332,7 @@ fn structured_tree_block(
 
     div()
         .w_full()
-        .h(px(360.))
+        .h(fill_height(window))
         .rounded(cx.theme().radius)
         .bg(cx.theme().muted)
         .overflow_hidden()
@@ -820,6 +831,7 @@ fn pdf_block(
     pages: &[Arc<RenderImage>],
     total_pages: usize,
     note: Option<&SharedString>,
+    window: &Window,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
     if pages.is_empty() {
@@ -840,7 +852,9 @@ fn pdf_block(
         column = column.child(
             div()
                 .w_full()
-                .h(px(520.))
+                // Each page fills the inspector's visible height; the outer
+                // scroll container pages through them.
+                .h(fill_height(window))
                 .rounded(cx.theme().radius)
                 .bg(cx.theme().muted)
                 .overflow_hidden()
@@ -890,6 +904,97 @@ fn media_block(rows: &[(SharedString, SharedString)], cx: &Context<InspectorPane
                 )
         }))
         .into_any_element()
+}
+
+// -- Git diff ---------------------------------------------------------------
+
+/// Monochrome unified diff: hunk headers muted, removed lines muted, added
+/// lines at full foreground on a subtle band. Also used directly by the Git
+/// inspector mode. All strings are pre-sanitized by the git backend.
+pub(super) fn diff_block(
+    payload: &crate::services::git::types::DiffPayload,
+    cx: &Context<InspectorPanel>,
+) -> AnyElement {
+    use crate::services::git::types::DiffLineKind;
+
+    if let Some(note) = &payload.note {
+        return message_box(note.clone(), cx);
+    }
+
+    let mut body = v_flex()
+        .w_full()
+        .gap_1()
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(
+                    gpui_component::Icon::new(crate::app::assets::PikuIcon::GitCommit)
+                        .size(px(12.)),
+                )
+                .child(format!("{} → {}", payload.old_label, payload.new_label)),
+        );
+
+    for (hunk_ix, hunk) in payload.hunks.iter().enumerate() {
+        let mut block = v_flex()
+            .w_full()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().muted)
+            .p_1()
+            .font_family("monospace")
+            .text_xs()
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(hunk.header.clone()),
+            );
+        for (ix, (kind, text)) in hunk.lines.iter().enumerate() {
+            let (prefix, color, banded) = match kind {
+                DiffLineKind::Context => (" ", cx.theme().muted_foreground, false),
+                DiffLineKind::Del => ("-", cx.theme().muted_foreground, false),
+                DiffLineKind::Add => ("+", cx.theme().foreground, true),
+            };
+            let mut line = h_flex()
+                .id(("diff-line", hunk_ix * 10_000 + ix))
+                .w_full()
+                .gap_1()
+                .child(
+                    div()
+                        .w(px(10.))
+                        .flex_none()
+                        .text_color(color)
+                        .child(prefix),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(color)
+                        .whitespace_nowrap()
+                        .child(text.clone()),
+                );
+            if banded {
+                line = line.bg(cx.theme().list_active);
+            }
+            if *kind == DiffLineKind::Del {
+                line = line.line_through();
+            }
+            block = block.child(line);
+        }
+        body = body.child(div().id(("diff-hunk", hunk_ix)).overflow_x_scroll().child(block));
+    }
+
+    if payload.truncated {
+        body = body.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("… diff truncated"),
+        );
+    }
+    body.into_any_element()
 }
 
 fn message_box(message: String, cx: &Context<InspectorPanel>) -> AnyElement {

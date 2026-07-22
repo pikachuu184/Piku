@@ -83,6 +83,9 @@ pub enum PikuIcon {
     Camera,
     Gauge,
     Minimize,
+    // Git.
+    GitBranch,
+    GitCommit,
 }
 
 impl IconNamed for PikuIcon {
@@ -132,6 +135,8 @@ impl IconNamed for PikuIcon {
             Self::Camera => "icons/piku/camera.svg",
             Self::Gauge => "icons/piku/gauge.svg",
             Self::Minimize => "icons/piku/minimize.svg",
+            Self::GitBranch => "icons/piku/git-branch.svg",
+            Self::GitCommit => "icons/piku/git-commit.svg",
         }
         .into()
     }

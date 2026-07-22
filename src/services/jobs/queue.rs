@@ -181,6 +181,47 @@ impl JobQueue {
         });
     }
 
+    /// Fetch one remote of a repository as a background job (progress and
+    /// cancel share the transfer engine's UI). Completion writes an audit
+    /// record and asks the `GitStore` to refresh the repository.
+    pub fn submit_git_fetch(
+        &mut self,
+        root: PathBuf,
+        remote: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = format!("Fetching “{remote}”");
+        let backend = crate::state::PikuState::global(cx).git.read(cx).backend();
+        let job_root = root;
+        self.spawn_job(JobKind::GitFetch, title, window, cx, move |tx, cancel| {
+            use crate::services::git::backend::GitBackend as _;
+            let result = backend.fetch(&job_root, &remote, &tx, &cancel);
+            let (ok, message) = match &result {
+                Ok(outcome) => (
+                    true,
+                    format!(
+                        "Fetched “{}” — {} ref{} updated",
+                        outcome.remote,
+                        outcome.updated_refs,
+                        plural(outcome.updated_refs)
+                    ),
+                ),
+                Err(error) => (false, error.to_string()),
+            };
+            crate::security::audit::record("git.fetch", &job_root, None, ok, &remote);
+            let _ = tx.unbounded_send(JobEvent::Finished(if ok {
+                Ok(message)
+            } else if cancel.load(Ordering::Relaxed) {
+                Err("cancelled".into())
+            } else {
+                Err(message)
+            }));
+        });
+        // No explicit refresh needed: a fetch that updated anything touched
+        // `.git`/`.git/refs/remotes`, which the repo watchers already cover.
+    }
+
     fn spawn_job(
         &mut self,
         kind: JobKind,

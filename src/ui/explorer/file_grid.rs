@@ -116,7 +116,16 @@ impl ExplorerPanel {
                     }))
                 })
             })
-            .child(entry_visual(&entry, 34. * zoom, cx))
+            .child(
+                // Icon plus a git badge in the tile's top-right corner —
+                // same data source as the list view's badge column.
+                div()
+                    .relative()
+                    .child(entry_visual(&entry, 34. * zoom, cx))
+                    .children(self.git_badge(&entry, cx).map(|badge| {
+                        div().absolute().top_0().right_0().child(badge)
+                    })),
+            )
             .child(match editor {
                 Some(input) => div()
                     .w_full()

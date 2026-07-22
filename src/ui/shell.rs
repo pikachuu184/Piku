@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Edges, Entity, InteractiveElement as _, IntoElement,
     ParentElement, Render, Styled, Subscription, Task, WeakEntity, Window, div, px,
@@ -41,6 +42,9 @@ pub struct Workspace {
     dock_area: Entity<DockArea>,
     media_bar: Entity<crate::ui::media::MediaBar>,
     last_layout: Option<DockAreaState>,
+    /// Branch panel anchored above the status bar (toggled from its git
+    /// segment); dropped entirely when closed.
+    branch_popover: Option<Entity<crate::ui::git::BranchPopover>>,
     _save_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -66,12 +70,14 @@ impl Workspace {
             },
         ));
 
-        // Status bar re-renders with selection and job updates.
+        // Status bar re-renders with selection, job, and git updates.
         let state = PikuState::global(cx);
         let selection = state.selection.clone();
         let jobs = state.jobs.clone();
+        let git = state.git.clone();
         subscriptions.push(cx.observe(&selection, |_, _, cx| cx.notify()));
         subscriptions.push(cx.observe(&jobs, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.observe(&git, |_, _, cx| cx.notify()));
 
         cx.on_app_quit({
             let dock_area = dock_area.clone();
@@ -94,6 +100,7 @@ impl Workspace {
             dock_area: dock_area.clone(),
             media_bar,
             last_layout: None,
+            branch_popover: None,
             _save_task: None,
             _subscriptions: subscriptions,
         };
@@ -264,6 +271,27 @@ impl Workspace {
         {
             panel.update(cx, |panel, cx| panel.toggle_pin(cx));
         }
+    }
+
+    /// Toggle the branch panel for the repository containing the active
+    /// pane's directory (invoked from the status bar's git segment).
+    pub fn toggle_branch_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.branch_popover.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let state = PikuState::global(cx);
+        let root = state
+            .selection
+            .read(cx)
+            .dir
+            .as_deref()
+            .and_then(|dir| state.git.read(cx).root_for(dir).map(|r| r.to_path_buf()));
+        if let Some(root) = root {
+            self.branch_popover =
+                Some(cx.new(|cx| crate::ui::git::BranchPopover::new(root, window, cx)));
+        }
+        cx.notify();
     }
 
     fn split(&mut self, placement: Placement, window: &mut Window, cx: &mut Context<Self>) {
@@ -526,6 +554,22 @@ impl Render for Workspace {
             .child(self.title_bar.clone())
             .child(div().flex_1().min_h_0().child(self.dock_area.clone()))
             .child(self.media_bar.clone())
+            // Branch panel floating just above the status bar's git segment.
+            .when_some(self.branch_popover.clone(), |root, popover| {
+                root.child(
+                    div()
+                        .id("branch-popover-overlay")
+                        .absolute()
+                        .bottom(px(34.))
+                        .left(px(8.))
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.branch_popover = None;
+                            cx.notify();
+                        }))
+                        .child(popover),
+                )
+            })
             .child(crate::ui::statusbar::render_status_bar(self, cx))
             .children(sheet_layer)
             .children(dialog_layer)

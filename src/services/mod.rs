@@ -1,6 +1,7 @@
 pub mod audio_player;
 pub mod drive_scan;
 pub mod fs_service;
+pub mod git;
 pub mod jobs;
 pub mod preview_cache;
 pub mod search;

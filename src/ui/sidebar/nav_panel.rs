@@ -22,7 +22,6 @@ use crate::services::fs_service::{self, DriveInfo, Place};
 use crate::state::PikuState;
 use crate::ui::components::skeleton_rows;
 use crate::ui::explorer::navigate_active;
-use crate::ui::sidebar::drive_list::drive_details;
 use crate::ui::sidebar::section::section;
 
 /// Inline workspace name editor shown in the switcher header — creation and
@@ -89,13 +88,25 @@ impl NavPanel {
         // global Create/Rename actions.
         PikuState::global(cx).set_nav_panel(cx.entity().downgrade());
 
+        // Git awareness for Places: discovery is negative-cached and bounded
+        // by the handful of known places, so this is a one-shot cheap probe.
+        // Rows re-render (branch badge) whenever repository state changes.
+        let git = PikuState::global(cx).git.clone();
+        let git_sub = cx.observe(&git, |_, _, cx| cx.notify());
+        let places = fs_service::known_places();
+        git.update(cx, |git, cx| {
+            for place in &places {
+                git.note_dir(place.path.clone(), cx);
+            }
+        });
+
         Self {
             focus_handle: cx.focus_handle(),
-            places: fs_service::known_places(),
+            places,
             drives: Vec::new(),
             drives_loaded: false,
             ws_edit: None,
-            _subscriptions: vec![subscription, workspaces_sub, drive_stats_sub],
+            _subscriptions: vec![subscription, workspaces_sub, drive_stats_sub, git_sub],
         }
     }
 
@@ -255,6 +266,25 @@ impl NavPanel {
             })
             .child(icon.size(px(16.)).text_color(cx.theme().muted_foreground))
             .child(div().flex_1().min_w_0().truncate().child(label))
+            .children({
+                // Branch badge when this place is itself a repository (the
+                // name is pre-sanitized and capped by the git store).
+                let git = PikuState::global(cx).git.read(cx);
+                git.root_for(&path)
+                    .and_then(|root| git.snapshot(root))
+                    .and_then(|snap| snap.branch.clone())
+                    .map(|branch| {
+                        h_flex()
+                            .gap_0p5()
+                            .items_center()
+                            .flex_none()
+                            .max_w(px(90.))
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(Icon::new(PikuIcon::GitBranch).size(px(11.)))
+                            .child(div().truncate().child(branch))
+                    })
+            })
             .context_menu(move |menu, _, cx| {
                 let nav = PikuState::global(cx).nav.read(cx);
                 let is_favorite = nav.is_favorite(&menu_path);
@@ -387,49 +417,32 @@ impl Render for NavPanel {
                     .child(skeleton_rows(3, 24., cx)),
             )
         } else {
-            v_flex().gap_1().children(
-            self.drives
-                .iter()
-                .enumerate()
-                .map(|(ix, drive)| {
-                    let path = drive.mount.clone();
-                    let used = drive.total.saturating_sub(drive.available);
-                    let percent = if drive.total > 0 {
-                        used as f64 / drive.total as f64 * 100.0
-                    } else {
-                        0.0
-                    };
-                    let summary = format!(
-                        "{} used of {} — {} free ({percent:.0}%)",
-                        crate::core::format::format_size(used),
-                        crate::core::format::format_size(drive.total),
-                        crate::core::format::format_size(drive.available),
-                    );
-                    h_flex()
-                        .id(SharedString::from(format!("drive-{ix}")))
-                        .items_start()
-                        .gap_2()
-                        .mx_1()
-                        .px_2()
-                        .py_1p5()
-                        .rounded(cx.theme().radius)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(cx.theme().sidebar_accent))
-                        .on_click(move |_, window, cx| {
-                            navigate_active(path.clone(), window, cx);
+            // Ring tiles flow two per row and wrap with the drive count.
+            v_flex().child(
+                h_flex().flex_wrap().mx_1().children(
+                    self.drives
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, drive)| {
+                            let path = drive.mount.clone();
+                            let summary = super::drive_list::drive_summary(drive, cx);
+                            div()
+                                .id(SharedString::from(format!("drive-{ix}")))
+                                .w_1_2()
+                                .rounded(cx.theme().radius)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(cx.theme().sidebar_accent))
+                                .on_click(move |_, window, cx| {
+                                    navigate_active(path.clone(), window, cx);
+                                })
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(summary.clone())
+                                        .build(window, cx)
+                                })
+                                .child(super::drive_list::drive_tile(drive, cx))
                         })
-                        .tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(summary.clone())
-                                .build(window, cx)
-                        })
-                        .child(
-                            Icon::new(IconName::HardDrive)
-                                .size(px(16.))
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(drive_details(ix, drive, cx))
-                })
-                .collect::<Vec<_>>(),
+                        .collect::<Vec<_>>(),
+                ),
             )
         };
 

@@ -81,6 +81,31 @@ impl ExplorerPanel {
             )
     }
 
+    /// Git status cell for one row: a status letter for files, a dot for
+    /// directories containing dirty entries, nothing outside a repository.
+    /// Data comes pre-sanitized from the `GitStore`.
+    pub(super) fn git_badge(&self, entry: &FsEntry, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        use gpui::IntoElement as _;
+        let git = crate::state::PikuState::global(cx).git.read(cx);
+        let cwd = &self.session.cwd;
+        git.root_for(cwd)?;
+        // Ignored beats everything else (an ignored dir is never "dirty").
+        if git.is_ignored(cwd, &entry.path) {
+            let ignored = crate::services::git::types::GitFileStatus {
+                index: None,
+                worktree: Some(crate::services::git::types::GitStatusCode::Ignored),
+            };
+            return crate::ui::components::status_glyph(ignored, cx).map(|g| g.into_any_element());
+        }
+        if entry.is_dir() {
+            git.dir_dirty(cwd, &entry.path)
+                .then(|| crate::ui::components::dirty_dir_dot(cx).into_any_element())
+        } else {
+            let status = git.status_of(cwd, &entry.path)?;
+            crate::ui::components::status_glyph(status, cx).map(|g| g.into_any_element())
+        }
+    }
+
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(entry) = self.entries.get(ix) else {
             return div().into_any_element();
@@ -203,6 +228,7 @@ impl ExplorerPanel {
                     .child(entry.name.clone())
                     .into_any_element(),
             })
+            .children(self.git_badge(&entry, cx))
             .child(
                 div()
                     .w(px(BASE_SIZE_COL * zoom))
