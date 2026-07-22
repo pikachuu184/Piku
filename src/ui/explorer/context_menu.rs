@@ -21,7 +21,11 @@ pub(super) fn build(
 
     if has_selection {
         menu = menu
-            .menu_with_icon("Open", Icon::new(IconName::ExternalLink), Box::new(OpenSelection))
+            .menu_with_icon(
+                "Open",
+                Icon::new(IconName::ExternalLink),
+                Box::new(OpenSelection),
+            )
             .separator()
             .menu_with_icon("Copy", Icon::new(IconName::Copy), Box::new(CopySelection))
             .menu_with_icon("Cut", Icon::new(PikuIcon::Scissors), Box::new(CutSelection));
@@ -38,7 +42,11 @@ pub(super) fn build(
     }
     if has_selection {
         menu = menu
-            .menu_with_icon("Rename", Icon::new(PikuIcon::Pencil), Box::new(RenameSelection))
+            .menu_with_icon(
+                "Rename",
+                Icon::new(PikuIcon::Pencil),
+                Box::new(RenameSelection),
+            )
             .menu_with_icon(
                 "Move to Recycle Bin",
                 Icon::new(PikuIcon::Trash),
@@ -59,11 +67,7 @@ pub(super) fn build(
         Icon::new(PikuIcon::FolderPlus),
         Box::new(NewFolder),
     )
-    .menu_with_icon(
-        "New file",
-        Icon::new(PikuIcon::FilePlus),
-        Box::new(NewFile),
-    )
+    .menu_with_icon("New file", Icon::new(PikuIcon::FilePlus), Box::new(NewFile))
     .menu_with_icon(
         "Refresh",
         Icon::new(PikuIcon::RefreshCw),

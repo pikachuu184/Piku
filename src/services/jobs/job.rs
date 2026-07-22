@@ -83,7 +83,13 @@ impl Job {
 
 /// Events streamed from the worker thread back to the UI executor.
 pub enum JobEvent {
-    Scanned { total_bytes: u64, total_items: usize },
-    Progress { delta_bytes: u64, delta_items: usize },
+    Scanned {
+        total_bytes: u64,
+        total_items: usize,
+    },
+    Progress {
+        delta_bytes: u64,
+        delta_items: usize,
+    },
     Finished(Result<String, String>),
 }

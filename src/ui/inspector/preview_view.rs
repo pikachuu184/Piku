@@ -12,7 +12,6 @@ use gpui::{
     StatefulInteractiveElement as _, Styled, StyledImage as _, Window, canvas, div, img,
     prelude::FluentBuilder as _, px,
 };
-use std::sync::Arc;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -24,6 +23,7 @@ use gpui_component::{
     v_flex,
 };
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::app::assets::PikuIcon;
 use crate::core::format::format_size;
@@ -47,16 +47,22 @@ pub(super) fn render_preview_box(
         return div().into_any_element();
     };
     let element = match &*loaded.content {
-        PreviewContent::Image { path, dimensions } => {
-            image_block(panel, path, *dimensions, cx)
-        }
-        PreviewContent::Code { text, language, truncated, total_size } => v_flex()
+        PreviewContent::Image { path, dimensions } => image_block(panel, path, *dimensions, cx),
+        PreviewContent::Code {
+            text,
+            language,
+            truncated,
+            total_size,
+        } => v_flex()
             .w_full()
             .gap_1()
             .when_truncated(*truncated, text.len(), *total_size, cx)
             .child(code_editor_block(
                 panel,
-                CodeSyncKey { path: loaded.path.clone(), variant: "code" },
+                CodeSyncKey {
+                    path: loaded.path.clone(),
+                    variant: "code",
+                },
                 text,
                 *language,
                 window,
@@ -66,28 +72,47 @@ pub(super) fn render_preview_box(
         PreviewContent::Markdown { source, truncated } => {
             markdown_block(panel, &loaded.path, source, *truncated, window, cx)
         }
-        PreviewContent::Structured { text, language, pretty, truncated } => {
-            structured_block(panel, &loaded.path, text, *language, pretty.as_ref(), *truncated, window, cx)
-        }
-        PreviewContent::Archive { entries, total_count, truncated } => {
-            archive_block(entries, *total_count, *truncated, cx)
-        }
-        PreviewContent::Audio { rows, waveform, duration_ms } => {
-            audio_block(&loaded.path, rows, waveform, *duration_ms, cx)
-        }
+        PreviewContent::Structured {
+            text,
+            language,
+            pretty,
+            truncated,
+        } => structured_block(
+            panel,
+            &loaded.path,
+            text,
+            *language,
+            pretty.as_ref(),
+            *truncated,
+            window,
+            cx,
+        ),
+        PreviewContent::Archive {
+            entries,
+            total_count,
+            truncated,
+        } => archive_block(entries, *total_count, *truncated, cx),
+        PreviewContent::Audio {
+            rows,
+            waveform,
+            duration_ms,
+        } => audio_block(&loaded.path, rows, waveform, *duration_ms, cx),
         PreviewContent::Video { rows, poster } => {
             video_block(&loaded.path, rows, poster.clone(), cx)
         }
-        PreviewContent::Pdf { pages, total_pages, note } => {
-            pdf_block(pages, *total_pages, note.as_ref(), window, cx)
+        PreviewContent::Pdf {
+            pages,
+            total_pages,
+            note,
+        } => pdf_block(pages, *total_pages, note.as_ref(), window, cx),
+        PreviewContent::Hex {
+            rows,
+            signature,
+            total_size,
+        } => hex_block(rows, *signature, *total_size, cx),
+        PreviewContent::TooLarge { size } => {
+            message_box(format!("Too large to preview ({})", format_size(*size)), cx)
         }
-        PreviewContent::Hex { rows, signature, total_size } => {
-            hex_block(rows, *signature, *total_size, cx)
-        }
-        PreviewContent::TooLarge { size } => message_box(
-            format!("Too large to preview ({})", format_size(*size)),
-            cx,
-        ),
         PreviewContent::Diff(payload) => diff_block(payload, cx),
         PreviewContent::Error(message) => message_box(message.to_string(), cx),
     };
@@ -158,17 +183,34 @@ fn markdown_block(
     let raw = panel.view.markdown_raw;
     let toggle = h_flex()
         .gap_1()
-        .child(toggle_button("pv-md-rendered", PikuIcon::Eye, "Rendered", !raw, cx, |view| {
-            view.markdown_raw = false;
-        }))
-        .child(toggle_button("pv-md-raw", PikuIcon::FileText, "Raw source", raw, cx, |view| {
-            view.markdown_raw = true;
-        }));
+        .child(toggle_button(
+            "pv-md-rendered",
+            PikuIcon::Eye,
+            "Rendered",
+            !raw,
+            cx,
+            |view| {
+                view.markdown_raw = false;
+            },
+        ))
+        .child(toggle_button(
+            "pv-md-raw",
+            PikuIcon::FileText,
+            "Raw source",
+            raw,
+            cx,
+            |view| {
+                view.markdown_raw = true;
+            },
+        ));
 
     let body = if raw {
         code_editor_block(
             panel,
-            CodeSyncKey { path: path.to_path_buf(), variant: "md-raw" },
+            CodeSyncKey {
+                path: path.to_path_buf(),
+                variant: "md-raw",
+            },
             source,
             Some("markdown"),
             window,
@@ -285,7 +327,10 @@ fn structured_block(
         .when_truncated(truncated, text.len(), 0, cx)
         .child(code_editor_block(
             panel,
-            CodeSyncKey { path: path.to_path_buf(), variant },
+            CodeSyncKey {
+                path: path.to_path_buf(),
+                variant,
+            },
             shown,
             language,
             window,
@@ -592,7 +637,10 @@ fn checkerboard() -> impl IntoElement {
                         bounds.origin.y + px(row as f32 * CELL),
                     );
                     window.paint_quad(gpui::fill(
-                        gpui::Bounds { origin, size: gpui::size(px(CELL), px(CELL)) },
+                        gpui::Bounds {
+                            origin,
+                            size: gpui::size(px(CELL), px(CELL)),
+                        },
                         alt,
                     ));
                 }
@@ -677,9 +725,13 @@ fn archive_block(
                 .gap_2()
                 .items_center()
                 .child(
-                    Icon::new(if item.is_dir { IconName::Folder } else { IconName::File })
-                        .size(px(13.))
-                        .text_color(cx.theme().muted_foreground),
+                    Icon::new(if item.is_dir {
+                        IconName::Folder
+                    } else {
+                        IconName::File
+                    })
+                    .size(px(13.))
+                    .text_color(cx.theme().muted_foreground),
                 )
                 .child(
                     div()
@@ -695,7 +747,11 @@ fn archive_block(
                         .flex_none()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(if item.is_dir { "—".to_string() } else { format_size(item.size) }),
+                        .child(if item.is_dir {
+                            "—".to_string()
+                        } else {
+                            format_size(item.size)
+                        }),
                 ),
         );
     }
@@ -796,12 +852,18 @@ fn video_block(
                 .bg(cx.theme().muted)
                 .overflow_hidden()
                 .child(
-                    div().absolute().inset_0().flex().items_center().justify_center().child(
-                        img(ImageSource::Render(image))
-                            .max_w_full()
-                            .max_h_full()
-                            .object_fit(ObjectFit::Contain),
-                    ),
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            img(ImageSource::Render(image))
+                                .max_w_full()
+                                .max_h_full()
+                                .object_fit(ObjectFit::Contain),
+                        ),
                 ),
         );
     }
@@ -845,7 +907,10 @@ fn pdf_block(
         div()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .child(format!("{total_pages} page{}", if total_pages == 1 { "" } else { "s" })),
+            .child(format!(
+                "{total_pages} page{}",
+                if total_pages == 1 { "" } else { "s" }
+            )),
     );
     // Pages stack vertically; the inspector's outer scroll container walks them.
     for page in pages {
@@ -921,21 +986,15 @@ pub(super) fn diff_block(
         return message_box(note.clone(), cx);
     }
 
-    let mut body = v_flex()
-        .w_full()
-        .gap_1()
-        .child(
-            h_flex()
-                .gap_1()
-                .items_center()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(
-                    gpui_component::Icon::new(crate::app::assets::PikuIcon::GitCommit)
-                        .size(px(12.)),
-                )
-                .child(format!("{} → {}", payload.old_label, payload.new_label)),
-        );
+    let mut body = v_flex().w_full().gap_1().child(
+        h_flex()
+            .gap_1()
+            .items_center()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(gpui_component::Icon::new(crate::app::assets::PikuIcon::GitCommit).size(px(12.)))
+            .child(format!("{} → {}", payload.old_label, payload.new_label)),
+    );
 
     for (hunk_ix, hunk) in payload.hunks.iter().enumerate() {
         let mut block = v_flex()
@@ -960,13 +1019,7 @@ pub(super) fn diff_block(
                 .id(("diff-line", hunk_ix * 10_000 + ix))
                 .w_full()
                 .gap_1()
-                .child(
-                    div()
-                        .w(px(10.))
-                        .flex_none()
-                        .text_color(color)
-                        .child(prefix),
-                )
+                .child(div().w(px(10.)).flex_none().text_color(color).child(prefix))
                 .child(
                     div()
                         .flex_1()
@@ -983,7 +1036,12 @@ pub(super) fn diff_block(
             }
             block = block.child(line);
         }
-        body = body.child(div().id(("diff-hunk", hunk_ix)).overflow_x_scroll().child(block));
+        body = body.child(
+            div()
+                .id(("diff-hunk", hunk_ix))
+                .overflow_x_scroll()
+                .child(block),
+        );
     }
 
     if payload.truncated {

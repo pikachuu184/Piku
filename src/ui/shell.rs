@@ -51,8 +51,7 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let dock_area =
-            cx.new(|cx| DockArea::new(DOCK_ID, Some(DOCK_VERSION), window, cx));
+        let dock_area = cx.new(|cx| DockArea::new(DOCK_ID, Some(DOCK_VERSION), window, cx));
         let weak_dock = dock_area.downgrade();
 
         if Self::load_layout(&dock_area, window, cx).is_err() {
@@ -198,9 +197,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self._save_task = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_secs(2))
-                .await;
+            cx.background_executor().timer(Duration::from_secs(2)).await;
             let _ = this.update(cx, move |this: &mut Workspace, cx| {
                 let state = dock_area.read(cx).dump(cx);
                 if this.last_layout.as_ref() == Some(&state) {
@@ -382,7 +379,10 @@ impl Workspace {
                 dock_area.toggle_dock(DockPlacement::Left, window, cx);
             }
         });
-        if let Some(panel) = PikuState::global(cx).nav_panel().and_then(|weak| weak.upgrade()) {
+        if let Some(panel) = PikuState::global(cx)
+            .nav_panel()
+            .and_then(|weak| weak.upgrade())
+        {
             panel.update(cx, |panel, cx| {
                 panel.start_workspace_edit(create, window, cx);
             });
@@ -417,7 +417,10 @@ impl Workspace {
             )
         };
         let Some(fallback) = fallback else {
-            window.push_notification(crate::ui::toast::info("Cannot delete the last workspace"), cx);
+            window.push_notification(
+                crate::ui::toast::info("Cannot delete the last workspace"),
+                cx,
+            );
             return;
         };
 
@@ -461,9 +464,7 @@ impl Workspace {
                 .title("About")
                 .w(px(360.))
                 .overlay_closable(true)
-                .content(|content, _, cx| {
-                    content.child(crate::ui::titlebar::about_content(cx))
-                })
+                .content(|content, _, cx| content.child(crate::ui::titlebar::about_content(cx)))
         });
     }
 }

@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::AppContext as _;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
@@ -212,15 +212,13 @@ impl InspectorPanel {
                             300,
                             false,
                         );
-                        this.git.diff = Some(Arc::new(
-                            crate::services::git::types::DiffPayload {
-                                old_label: String::new(),
-                                new_label: String::new(),
-                                hunks: Vec::new(),
-                                truncated: false,
-                                note: Some(note),
-                            },
-                        ));
+                        this.git.diff = Some(Arc::new(crate::services::git::types::DiffPayload {
+                            old_label: String::new(),
+                            new_label: String::new(),
+                            hunks: Vec::new(),
+                            truncated: false,
+                            note: Some(note),
+                        }));
                     }
                 }
                 cx.notify();
@@ -345,7 +343,11 @@ pub(super) fn render_git(
     let branch_line = snap
         .branch
         .clone()
-        .or_else(|| snap.detached_short.clone().map(|s| format!("detached @ {s}")))
+        .or_else(|| {
+            snap.detached_short
+                .clone()
+                .map(|s| format!("detached @ {s}"))
+        })
         .unwrap_or_else(|| "no commits yet".into());
 
     let mut header = v_flex()
@@ -424,7 +426,11 @@ pub(super) fn render_git(
                     "{} → {}{}",
                     remote.name,
                     remote.url,
-                    if remote.fetchable { "" } else { " (fetch disabled)" }
+                    if remote.fetchable {
+                        ""
+                    } else {
+                        " (fetch disabled)"
+                    }
                 )),
         );
     }
@@ -477,13 +483,21 @@ pub(super) fn render_git(
                 // Honest capability display: keyed off the backend so a
                 // future push-capable backend lights this up automatically.
                 use crate::services::git::backend::GitBackend as _;
-                let push_ok = PikuState::global(cx).git.read(cx).backend().push_supported();
+                let push_ok = PikuState::global(cx)
+                    .git
+                    .read(cx)
+                    .backend()
+                    .push_supported();
                 div()
                     .px_2()
                     .py_0p5()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(if push_ok { "Push" } else { "Push — not yet supported" })
+                    .child(if push_ok {
+                        "Push"
+                    } else {
+                        "Push — not yet supported"
+                    })
             }),
     );
 
@@ -559,8 +573,7 @@ pub(super) fn render_git(
             for (ix, (rel, code)) in entries.iter().take(CHANGE_ROWS_SHOWN).enumerate() {
                 let rel_for_click = rel.clone();
                 let root_for_click = root.clone();
-                let button_id =
-                    gpui::SharedString::from(format!("chg-{label}-{ix}"));
+                let button_id = gpui::SharedString::from(format!("chg-{label}-{ix}"));
                 // Clicking the row shows the change itself: staged rows
                 // compare index ↔ HEAD, unstaged rows worktree ↔ index.
                 let diff_rel = rel.clone();
@@ -668,10 +681,7 @@ pub(super) fn render_git(
                 })
                 .clone();
             // A finished successful commit clears the box.
-            if this.git.committing
-                && this.git.error.is_none()
-                && staged.is_empty()
-            {
+            if this.git.committing && this.git.error.is_none() && staged.is_empty() {
                 this.git.committing = false;
                 input.update(cx, |state, cx| state.set_value("", window, cx));
             }
@@ -695,9 +705,7 @@ pub(super) fn render_git(
                                     .text_color(cx.theme().foreground)
                                     .hover(|s| s.bg(cx.theme().list_hover))
                             })
-                            .when(!can_commit, |s| {
-                                s.text_color(cx.theme().muted_foreground)
-                            })
+                            .when(!can_commit, |s| s.text_color(cx.theme().muted_foreground))
                             .child(if this.git.committing {
                                 "Committing…"
                             } else {
@@ -717,17 +725,15 @@ pub(super) fn render_git(
                                         .take(crate::services::git::MAX_BODY_CHARS)
                                         .collect();
                                     if message.trim().is_empty() {
-                                        this.git.error =
-                                            Some("commit message is empty".into());
+                                        this.git.error = Some("commit message is empty".into());
                                         cx.notify();
                                         return;
                                     }
                                     this.git.committing = true;
                                     this.git.error = None;
-                                    PikuState::global(cx).git.clone().update(
-                                        cx,
-                                        |git, cx| git.commit(root.clone(), message, cx),
-                                    );
+                                    PikuState::global(cx).git.clone().update(cx, |git, cx| {
+                                        git.commit(root.clone(), message, cx)
+                                    });
                                     cx.notify();
                                 }
                             })),
@@ -829,7 +835,11 @@ pub(super) fn render_git(
 
     // ---- Commit timeline ----------------------------------------------------
     this.ensure_commits(root.clone(), cx);
-    let mut timeline = v_flex().gap_1().child(section_label_iconed(PikuIcon::GitCommit, "Recent commits", cx));
+    let mut timeline = v_flex().gap_1().child(section_label_iconed(
+        PikuIcon::GitCommit,
+        "Recent commits",
+        cx,
+    ));
     if this.git.commits.is_empty() && this.git.commits_loading {
         timeline = timeline.child(
             div()
@@ -883,7 +893,10 @@ pub(super) fn render_git(
 
     // ---- Loaded diff --------------------------------------------------------
     if this.git.diff_key.is_some() {
-        let mut section = v_flex().gap_1().child(section_label_iconed(PikuIcon::FileCode, "Diff", cx));
+        let mut section =
+            v_flex()
+                .gap_1()
+                .child(section_label_iconed(PikuIcon::FileCode, "Diff", cx));
         if this.git.diff_loading {
             section = section.child(
                 div()

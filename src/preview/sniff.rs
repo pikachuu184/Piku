@@ -83,7 +83,10 @@ mod tests {
         assert_eq!(sniff(b"PK\x03\x04rest"), Some("ZIP archive"));
         assert_eq!(sniff(b"MZ\x90\x00"), Some("Windows executable (PE)"));
         assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 "), Some("WebP image"));
-        assert_eq!(sniff(b"\x00\x00\x00\x20ftypisom"), Some("MP4/QuickTime media"));
+        assert_eq!(
+            sniff(b"\x00\x00\x00\x20ftypisom"),
+            Some("MP4/QuickTime media")
+        );
         assert_eq!(sniff(b"plain text here"), None);
         assert_eq!(sniff(b""), None);
     }

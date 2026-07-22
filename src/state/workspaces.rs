@@ -49,8 +49,7 @@ impl WorkspaceStore {
     }
 
     pub fn load_or_migrate() -> Self {
-        let mut index: WorkspaceIndex =
-            persistence::load_json(INDEX_FILE).unwrap_or_default();
+        let mut index: WorkspaceIndex = persistence::load_json(INDEX_FILE).unwrap_or_default();
 
         if index.workspaces.is_empty() {
             // First run (or wiped index): create the default workspace and
@@ -205,9 +204,11 @@ impl WorkspaceStore {
         if name.chars().count() > 60 {
             return Err("Workspace names are limited to 60 characters".into());
         }
-        let clash = self.index.workspaces.iter().any(|w| {
-            Some(w.id.as_str()) != ignore_id && w.name.eq_ignore_ascii_case(name)
-        });
+        let clash = self
+            .index
+            .workspaces
+            .iter()
+            .any(|w| Some(w.id.as_str()) != ignore_id && w.name.eq_ignore_ascii_case(name));
         if clash {
             return Err(format!("A workspace named “{name}” already exists"));
         }
@@ -293,7 +294,10 @@ mod tests {
     #[test]
     fn most_recent_other_skips_self() {
         let store = store_with(&["A", "B"]);
-        assert_eq!(store.most_recent_other("ws-test-0").unwrap().id, "ws-test-1");
+        assert_eq!(
+            store.most_recent_other("ws-test-0").unwrap().id,
+            "ws-test-1"
+        );
         assert!(store_with(&["A"]).most_recent_other("ws-test-0").is_none());
     }
 }

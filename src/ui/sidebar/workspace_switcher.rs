@@ -20,10 +20,7 @@ use crate::app::assets::PikuIcon;
 use crate::state::PikuState;
 use crate::ui::sidebar::NavPanel;
 
-pub(super) fn workspace_switcher(
-    panel: &NavPanel,
-    cx: &mut Context<NavPanel>,
-) -> impl IntoElement {
+pub(super) fn workspace_switcher(panel: &NavPanel, cx: &mut Context<NavPanel>) -> impl IntoElement {
     let store = PikuState::global(cx).workspaces.read(cx);
     let active_name: SharedString = store.active().name.clone().into();
     // Inline create/rename: the name label swaps for a small input — same

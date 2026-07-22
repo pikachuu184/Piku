@@ -240,7 +240,7 @@ impl GitStore {
                 refreshing: false,
                 interrupt: Arc::new(AtomicBool::new(false)),
                 _watchers: watchers,
-            last_touch: std::time::Instant::now(),
+                last_touch: std::time::Instant::now(),
             },
         );
         self.refresh(root, cx);
@@ -400,10 +400,16 @@ impl GitStore {
     }
 
     pub fn commit(&mut self, root: PathBuf, message: String, cx: &mut Context<Self>) {
-        self.run_mutation(root.clone(), "git.commit", String::new(), cx, move |backend| {
-            use super::backend::GitBackend as _;
-            backend.commit_create(&root, &message)
-        });
+        self.run_mutation(
+            root.clone(),
+            "git.commit",
+            String::new(),
+            cx,
+            move |backend| {
+                use super::backend::GitBackend as _;
+                backend.commit_create(&root, &message)
+            },
+        );
     }
 
     pub fn checkout(&mut self, root: PathBuf, branch: String, cx: &mut Context<Self>) {
@@ -417,18 +423,29 @@ impl GitStore {
 
     pub fn create_branch(&mut self, root: PathBuf, name: String, cx: &mut Context<Self>) {
         let detail = name.clone();
-        self.run_mutation(root.clone(), "git.branch.create", detail, cx, move |backend| {
-            use super::backend::GitBackend as _;
-            backend.create_branch(&root, &name).map(|_| name)
-        });
+        self.run_mutation(
+            root.clone(),
+            "git.branch.create",
+            detail,
+            cx,
+            move |backend| {
+                use super::backend::GitBackend as _;
+                backend.create_branch(&root, &name).map(|_| name)
+            },
+        );
     }
 
     pub fn delete_branch(&mut self, root: PathBuf, name: String, cx: &mut Context<Self>) {
         let detail = name.clone();
-        self.run_mutation(root.clone(), "git.branch.delete", detail, cx, move |backend| {
-            use super::backend::GitBackend as _;
-            backend.delete_branch(&root, &name).map(|_| name)
-        });
+        self.run_mutation(
+            root.clone(),
+            "git.branch.delete",
+            detail,
+            cx,
+            move |backend| {
+                use super::backend::GitBackend as _;
+                backend.delete_branch(&root, &name).map(|_| name)
+            },
+        );
     }
 }
-

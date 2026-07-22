@@ -77,7 +77,9 @@ impl VideoView {
                     break; // entity dropped
                 };
                 let delay = if playing { 33 } else { 120 };
-                cx.background_executor().timer(Duration::from_millis(delay)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(delay))
+                    .await;
             }
         })
         .detach();
@@ -149,7 +151,11 @@ impl VideoView {
         let muted = self.player.is_muted();
         let speed = self.player.speed();
 
-        let play_icon = if playing { PikuIcon::Pause } else { PikuIcon::Play };
+        let play_icon = if playing {
+            PikuIcon::Pause
+        } else {
+            PikuIcon::Play
+        };
 
         v_flex()
             .w_full()
@@ -262,7 +268,11 @@ impl VideoView {
                         Button::new("vv-full")
                             .ghost()
                             .xsmall()
-                            .icon(if self.fullscreen { PikuIcon::Minimize } else { PikuIcon::Maximize })
+                            .icon(if self.fullscreen {
+                                PikuIcon::Minimize
+                            } else {
+                                PikuIcon::Maximize
+                            })
                             .tooltip(if self.fullscreen { "Shrink" } else { "Expand" })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.fullscreen = !this.fullscreen;
@@ -275,7 +285,11 @@ impl VideoView {
 
     /// Click/drag seek bar drawn over a plain progress track.
     fn timeline(&self, pos: u64, dur: u64, cx: &mut Context<Self>) -> impl IntoElement {
-        let progress = if dur > 0 { (pos as f32 / dur as f32).clamp(0.0, 1.0) } else { 0.0 };
+        let progress = if dur > 0 {
+            (pos as f32 / dur as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let played = cx.theme().foreground;
         let rest = cx.theme().muted_foreground;
 
@@ -336,7 +350,11 @@ impl VideoView {
     }
 
     fn volume_control(&self, volume: f32, muted: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let icon = if muted || volume <= 0.0 { PikuIcon::VolumeX } else { PikuIcon::Volume2 };
+        let icon = if muted || volume <= 0.0 {
+            PikuIcon::VolumeX
+        } else {
+            PikuIcon::Volume2
+        };
         let shown = if muted { 0.0 } else { volume };
         let fill_color = cx.theme().foreground;
 
@@ -430,7 +448,11 @@ fn trim_speed(speed: f32) -> String {
 
 impl Render for VideoView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().id("piku-video-view").track_focus(&self.focus_handle).w_full().child(self.surface(cx))
+        div()
+            .id("piku-video-view")
+            .track_focus(&self.focus_handle)
+            .w_full()
+            .child(self.surface(cx))
     }
 }
 

@@ -78,7 +78,10 @@ pub fn validate_branch_name(name: &str) -> Result<(), String> {
     if name.contains("..") || name.contains("//") || name.contains("@{") {
         return Err("branch name contains a forbidden sequence".into());
     }
-    if name.split('/').any(|part| part.is_empty() || part.starts_with('.')) {
+    if name
+        .split('/')
+        .any(|part| part.is_empty() || part.starts_with('.'))
+    {
         return Err("branch name has an empty or dot-leading component".into());
     }
     Ok(())

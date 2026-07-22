@@ -57,7 +57,11 @@ impl FsEntry {
             name,
             path,
             kind,
-            size: if kind == EntryKind::File { metadata.len() } else { 0 },
+            size: if kind == EntryKind::File {
+                metadata.len()
+            } else {
+                0
+            },
             modified: metadata.modified().ok(),
             created: metadata.created().ok(),
             hidden,

@@ -49,7 +49,11 @@ pub fn record(op: &str, src: &Path, dst: Option<&Path>, ok: bool, detail: &str) 
 
     let path = crate::state::persistence::data_dir().join("audit.log");
     rotate_if_needed(&path);
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(file, "{line}");
     }
 }

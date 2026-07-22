@@ -1,8 +1,8 @@
 //! Collapsible sidebar section with a chevron header.
 
 use gpui::{
-    App, ClickEvent, Div, InteractiveElement as _, ParentElement,
-    StatefulInteractiveElement as _, Styled, Window, div, px,
+    App, ClickEvent, Div, InteractiveElement as _, ParentElement, StatefulInteractiveElement as _,
+    Styled, Window, div, px,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, tooltip::Tooltip, v_flex};
 

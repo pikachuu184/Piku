@@ -127,7 +127,11 @@ impl VideoPlayer {
 
     pub fn fps(&self) -> f32 {
         let m = self.shared.fps_milli.load(Ordering::Acquire);
-        if m > 0 { m as f32 / 1000.0 } else { DEFAULT_FPS }
+        if m > 0 {
+            m as f32 / 1000.0
+        } else {
+            DEFAULT_FPS
+        }
     }
 
     pub fn duration_ms(&self) -> u64 {
@@ -154,7 +158,9 @@ impl VideoPlayer {
     /// and clamped to the known duration.
     pub fn position_ms(&self) -> u64 {
         let mut pos = self.base_ms;
-        if self.playing && let Some(start) = self.clock_start {
+        if self.playing
+            && let Some(start) = self.clock_start
+        {
             let elapsed = start.elapsed().as_secs_f32() * self.speed;
             pos = self.base_ms.saturating_add((elapsed * 1000.0) as u64);
         }
@@ -189,7 +195,11 @@ impl VideoPlayer {
     }
 
     pub fn toggle(&mut self) {
-        if self.playing { self.pause() } else { self.play() }
+        if self.playing {
+            self.pause()
+        } else {
+            self.play()
+        }
     }
 
     /// Seek to `at_ms`, restarting decode there and realigning audio. Preserves
@@ -287,7 +297,9 @@ impl Drop for VideoPlayer {
 /// Build a paused rodio sink for the file's audio track. Returns the stream
 /// (kept alive for output) and the sink; either is `None` on failure (no audio
 /// device, or the container's audio can't be decoded → silent playback).
-fn build_audio(path: &std::path::Path) -> (Option<(OutputStream, OutputStreamHandle)>, Option<Sink>) {
+fn build_audio(
+    path: &std::path::Path,
+) -> (Option<(OutputStream, OutputStreamHandle)>, Option<Sink>) {
     let Ok((file, _)) = crate::storage::local().open_read(path) else {
         return (None, None);
     };
@@ -351,27 +363,35 @@ fn decode_loop(
         match event {
             FfmpegEvent::ParsedInput(input) => {
                 if let Some(d) = input.duration {
-                    shared.duration_ms.store((d * 1000.0) as u64, Ordering::Release);
+                    shared
+                        .duration_ms
+                        .store((d * 1000.0) as u64, Ordering::Release);
                 }
             }
             FfmpegEvent::ParsedDuration(parsed) => {
-                shared.duration_ms.store((parsed.duration * 1000.0) as u64, Ordering::Release);
+                shared
+                    .duration_ms
+                    .store((parsed.duration * 1000.0) as u64, Ordering::Release);
             }
             FfmpegEvent::ParsedInputStream(stream) => {
                 if let Some(video) = stream.video_data()
                     && video.fps > 0.0
                 {
-                    shared.fps_milli.store((video.fps * 1000.0) as u64, Ordering::Release);
+                    shared
+                        .fps_milli
+                        .store((video.fps * 1000.0) as u64, Ordering::Release);
                 }
             }
             FfmpegEvent::OutputFrame(frame) => {
-                let Some(rgba) =
-                    image::RgbaImage::from_raw(frame.width, frame.height, frame.data)
+                let Some(rgba) = image::RgbaImage::from_raw(frame.width, frame.height, frame.data)
                 else {
                     continue;
                 };
                 let pts_ms = seek_ms + (frame.timestamp.max(0.0) * 1000.0) as u64;
-                let mut pending = Some(DecodedFrame { pts_ms, image: render_image_from_rgba(rgba) });
+                let mut pending = Some(DecodedFrame {
+                    pts_ms,
+                    image: render_image_from_rgba(rgba),
+                });
                 // Backpressure: hold the frame until the queue drains below cap.
                 while pending.is_some() {
                     if superseded(&shared) {
@@ -412,8 +432,15 @@ mod tests {
         let clip = dir.join("testsrc.mp4");
         let made = std::process::Command::new(ffmpeg_sidecar::paths::ffmpeg_path())
             .args([
-                "-y", "-loglevel", "error", "-f", "lavfi", "-i",
-                "testsrc=duration=1:size=320x240:rate=10", "-pix_fmt", "yuv420p",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=320x240:rate=10",
+                "-pix_fmt",
+                "yuv420p",
             ])
             .arg(&clip)
             .status();
@@ -431,8 +458,14 @@ mod tests {
                 break;
             }
         }
-        assert!(got_frame, "expected at least one decoded frame from the clip");
-        assert!(player.duration_ms() > 0, "expected ffmpeg to report a duration");
+        assert!(
+            got_frame,
+            "expected at least one decoded frame from the clip"
+        );
+        assert!(
+            player.duration_ms() > 0,
+            "expected ffmpeg to report a duration"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

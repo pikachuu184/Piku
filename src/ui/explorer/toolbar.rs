@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Context, InteractiveElement as _, IntoElement, ParentElement,
-    StatefulInteractiveElement as _, Styled, Window, div, px,
+    Context, InteractiveElement as _, IntoElement, ParentElement, StatefulInteractiveElement as _,
+    Styled, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, Size,
@@ -227,7 +227,9 @@ impl ExplorerPanel {
         let visible: Vec<Option<(usize, String, PathBuf)>> = if segments.len() > 6 {
             let mut items: Vec<Option<(usize, String, PathBuf)>> = Vec::with_capacity(5);
             let mut iter = segments.into_iter().enumerate();
-            let first = iter.next().map(|(ix, (label, path))| Some((ix, label, path)));
+            let first = iter
+                .next()
+                .map(|(ix, (label, path))| Some((ix, label, path)));
             items.extend(first);
             items.push(None);
             let rest: Vec<_> = iter.collect();

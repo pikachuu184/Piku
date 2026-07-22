@@ -133,10 +133,8 @@ impl DriveStatsStore {
                             }
                             ScanUpdate::Complete { mount, stats } => {
                                 store.stats.insert(mount, stats);
-                                let _ = crate::state::persistence::save_json(
-                                    CACHE_FILE,
-                                    &store.stats,
-                                );
+                                let _ =
+                                    crate::state::persistence::save_json(CACHE_FILE, &store.stats);
                             }
                         }
                         cx.notify();

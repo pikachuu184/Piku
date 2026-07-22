@@ -9,11 +9,11 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex, v_virtual_list};
 
+use super::explorer_panel::{DragPreview, DraggedPaths};
 use crate::core::entry::FsEntry;
 use crate::core::format::{format_size, format_time};
 use crate::ui::components::entry_visual;
 use crate::ui::explorer::ExplorerPanel;
-use super::explorer_panel::{DragPreview, DraggedPaths};
 
 const BASE_ROW_HEIGHT: f32 = 30.;
 const BASE_SIZE_COL: f32 = 90.;
@@ -32,8 +32,10 @@ impl ExplorerPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let zoom = self.zoom();
-        let sizes: Rc<Vec<Size<gpui::Pixels>>> =
-            Rc::new(vec![size(px(100.), px(row_height(zoom))); self.entries.len()]);
+        let sizes: Rc<Vec<Size<gpui::Pixels>>> = Rc::new(vec![
+            size(px(100.), px(row_height(zoom)));
+            self.entries.len()
+        ]);
 
         v_flex()
             .size_full()
@@ -71,9 +73,7 @@ impl ExplorerPanel {
                         "piku-file-list",
                         sizes,
                         move |this, range, _window, cx| {
-                            range
-                                .map(|ix| this.render_row(ix, cx))
-                                .collect::<Vec<_>>()
+                            range.map(|ix| this.render_row(ix, cx)).collect::<Vec<_>>()
                         },
                     )
                     .track_scroll(&self.scroll),
@@ -84,7 +84,11 @@ impl ExplorerPanel {
     /// Git status cell for one row: a status letter for files, a dot for
     /// directories containing dirty entries, nothing outside a repository.
     /// Data comes pre-sanitized from the `GitStore`.
-    pub(super) fn git_badge(&self, entry: &FsEntry, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn git_badge(
+        &self,
+        entry: &FsEntry,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         use gpui::IntoElement as _;
         let git = crate::state::PikuState::global(cx).git.read(cx);
         let cwd = &self.session.cwd;
@@ -182,7 +186,11 @@ impl ExplorerPanel {
                             paths: drag_paths.clone(),
                             source_id: source_id.clone(),
                         },
-                        move |_, _, _, cx| cx.new(|_| DragPreview { label: drag_label.clone() }),
+                        move |_, _, _, cx| {
+                            cx.new(|_| DragPreview {
+                                label: drag_label.clone(),
+                            })
+                        },
                     )
                 })
                 // Only folders accept a drop (into that folder). Ctrl forces a
@@ -195,7 +203,13 @@ impl ExplorerPanel {
                         let dest = dir_dest.clone();
                         move |this, dragged: &DraggedPaths, window, cx| {
                             let is_move = !window.modifiers().control;
-                            this.drop_into(dragged.paths.clone(), dest.clone(), is_move, window, cx);
+                            this.drop_into(
+                                dragged.paths.clone(),
+                                dest.clone(),
+                                is_move,
+                                window,
+                                cx,
+                            );
                         }
                     }))
                     .on_drop(cx.listener({

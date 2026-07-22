@@ -2,8 +2,8 @@
 //! progress and dock toggles on the right.
 
 use gpui::{
-    Context, InteractiveElement as _, IntoElement, ParentElement,
-    StatefulInteractiveElement as _, Styled, div, px,
+    Context, InteractiveElement as _, IntoElement, ParentElement, StatefulInteractiveElement as _,
+    Styled, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
@@ -21,10 +21,7 @@ use crate::services::jobs::JobStatus;
 use crate::state::PikuState;
 use crate::ui::shell::Workspace;
 
-pub fn render_status_bar(
-    workspace: &Workspace,
-    cx: &mut Context<Workspace>,
-) -> impl IntoElement {
+pub fn render_status_bar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let state = PikuState::global(cx);
     let selection = state.selection.read(cx);
 
@@ -55,10 +52,11 @@ pub fn render_status_bar(
     let git_segment = selection.dir.as_deref().and_then(|dir| {
         let git = state.git.read(cx);
         let snap = git.snapshot(git.root_for(dir)?)?;
-        let name = snap
-            .branch
-            .clone()
-            .or_else(|| snap.detached_short.as_ref().map(|s| format!("detached {s}")))?;
+        let name = snap.branch.clone().or_else(|| {
+            snap.detached_short
+                .as_ref()
+                .map(|s| format!("detached {s}"))
+        })?;
         let ahead_behind = match (snap.ahead, snap.behind) {
             (Some(ahead), Some(behind)) if ahead + behind > 0 => Some((ahead, behind)),
             _ => None,
@@ -133,33 +131,38 @@ pub fn render_status_bar(
     let mut bar = StatusBar::new().left(left);
 
     if let Some(job) = job
-        && job.status == JobStatus::Running {
-            bar = bar.right(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(job.title.clone()),
-                    )
-                    .child(div().w(px(110.)).child(Progress::new("job-progress").value(job.percent())))
-                    .child(
-                        Button::new("cancel-job")
-                            .icon(IconName::Close)
-                            .xsmall()
-                            .ghost()
-                            .tooltip("Cancel")
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                PikuState::global(cx)
-                                    .jobs
-                                    .clone()
-                                    .update(cx, |jobs, cx| jobs.cancel_active(cx));
-                            })),
-                    ),
-            );
-        }
+        && job.status == JobStatus::Running
+    {
+        bar = bar.right(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(job.title.clone()),
+                )
+                .child(
+                    div()
+                        .w(px(110.))
+                        .child(Progress::new("job-progress").value(job.percent())),
+                )
+                .child(
+                    Button::new("cancel-job")
+                        .icon(IconName::Close)
+                        .xsmall()
+                        .ghost()
+                        .tooltip("Cancel")
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            PikuState::global(cx)
+                                .jobs
+                                .clone()
+                                .update(cx, |jobs, cx| jobs.cancel_active(cx));
+                        })),
+                ),
+        );
+    }
 
     bar.right(
         h_flex()

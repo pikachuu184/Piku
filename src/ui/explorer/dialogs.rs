@@ -8,11 +8,7 @@ use gpui_component::{WindowExt as _, dialog::DialogButtonProps, v_flex};
 use crate::core::entry::FsEntry;
 use crate::state::PikuState;
 
-pub(super) fn confirm_delete(
-    entries: Vec<FsEntry>,
-    window: &mut Window,
-    cx: &mut gpui::App,
-) {
+pub(super) fn confirm_delete(entries: Vec<FsEntry>, window: &mut Window, cx: &mut gpui::App) {
     let count = entries.len();
     let description = if count == 1 {
         format!("“{}” will be moved to the Recycle Bin.", entries[0].name)

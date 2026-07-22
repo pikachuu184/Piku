@@ -1,8 +1,8 @@
 //! Custom title bar: PIKU logo on the left, workspace controls on the right.
 
 use gpui::{
-    App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement, Render,
-    Styled, WeakEntity, Window, div, px,
+    App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement, Render, Styled,
+    WeakEntity, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Sizable as _, TitleBar,
@@ -96,13 +96,7 @@ impl Render for PikuTitleBar {
                                 window.dispatch_action(Box::new(SplitDown), cx);
                             }),
                     )
-                    .child(
-                        div()
-                            .w(px(1.))
-                            .h(px(16.))
-                            .mx_1()
-                            .bg(cx.theme().border),
-                    )
+                    .child(div().w(px(1.)).h(px(16.)).mx_1().bg(cx.theme().border))
                     .child(
                         Button::new("toggle-left-dock")
                             .icon(if left_open {
@@ -170,6 +164,9 @@ pub fn about_content(cx: &App) -> impl IntoElement {
             div()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(format!("Monochrome file manager · v{}", env!("CARGO_PKG_VERSION"))),
+                .child(format!(
+                    "Monochrome file manager · v{}",
+                    env!("CARGO_PKG_VERSION")
+                )),
         )
 }

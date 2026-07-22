@@ -7,9 +7,9 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, v_flex};
 
+use super::explorer_panel::{DragPreview, DraggedPaths};
 use crate::ui::components::entry_visual;
 use crate::ui::explorer::ExplorerPanel;
-use super::explorer_panel::{DragPreview, DraggedPaths};
 
 impl ExplorerPanel {
     pub(super) fn render_grid(
@@ -94,7 +94,11 @@ impl ExplorerPanel {
                             paths: drag_paths.clone(),
                             source_id: source_id.clone(),
                         },
-                        move |_, _, _, cx| cx.new(|_| DragPreview { label: drag_label.clone() }),
+                        move |_, _, _, cx| {
+                            cx.new(|_| DragPreview {
+                                label: drag_label.clone(),
+                            })
+                        },
                     )
                 })
                 .when(is_dir, |tile| {
@@ -105,7 +109,13 @@ impl ExplorerPanel {
                         let dest = dir_dest.clone();
                         move |this, dragged: &DraggedPaths, window, cx| {
                             let is_move = !window.modifiers().control;
-                            this.drop_into(dragged.paths.clone(), dest.clone(), is_move, window, cx);
+                            this.drop_into(
+                                dragged.paths.clone(),
+                                dest.clone(),
+                                is_move,
+                                window,
+                                cx,
+                            );
                         }
                     }))
                     .on_drop(cx.listener({
@@ -122,9 +132,10 @@ impl ExplorerPanel {
                 div()
                     .relative()
                     .child(entry_visual(&entry, 34. * zoom, cx))
-                    .children(self.git_badge(&entry, cx).map(|badge| {
-                        div().absolute().top_0().right_0().child(badge)
-                    })),
+                    .children(
+                        self.git_badge(&entry, cx)
+                            .map(|badge| div().absolute().top_0().right_0().child(badge)),
+                    ),
             )
             .child(match editor {
                 Some(input) => div()

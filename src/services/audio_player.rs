@@ -48,7 +48,10 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn new() -> Self {
-        Self { volume: 1.0, ..Self::default() }
+        Self {
+            volume: 1.0,
+            ..Self::default()
+        }
     }
 
     fn handle(&mut self) -> Option<OutputStreamHandle> {
@@ -65,11 +68,16 @@ impl AudioPlayer {
     }
 
     pub fn is_playing(&self) -> bool {
-        self.sink.as_ref().is_some_and(|s| !s.is_paused() && !s.empty())
+        self.sink
+            .as_ref()
+            .is_some_and(|s| !s.is_paused() && !s.empty())
     }
 
     pub fn position(&self) -> Duration {
-        self.sink.as_ref().map(|s| s.get_pos()).unwrap_or(Duration::ZERO)
+        self.sink
+            .as_ref()
+            .map(|s| s.get_pos())
+            .unwrap_or(Duration::ZERO)
     }
 
     /// The currently loaded track's path, if any.
@@ -140,9 +148,16 @@ impl AudioPlayer {
         // Show now-playing immediately so the bottom bar/inspector update on the
         // click; the sink (open + decoder header probe) is built off the UI
         // thread so a large or slow file can't stall the interface.
-        self.meta = Some(meta.unwrap_or_else(|| TrackMeta {
-            title: path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string().into(),
-            ..TrackMeta::default()
+        self.meta = Some(meta.unwrap_or_else(|| {
+            TrackMeta {
+                title: path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string()
+                    .into(),
+                ..TrackMeta::default()
+            }
         }));
         self.current = Some(path.clone());
         if let Some(old) = self.sink.take() {
@@ -293,10 +308,19 @@ mod tests {
     #[test]
     fn seek_clamps_to_duration() {
         // Past the end pins to the end.
-        assert_eq!(clamp_seek(Duration::from_secs(90), 60_000), Duration::from_secs(60));
+        assert_eq!(
+            clamp_seek(Duration::from_secs(90), 60_000),
+            Duration::from_secs(60)
+        );
         // Within range passes through.
-        assert_eq!(clamp_seek(Duration::from_secs(30), 60_000), Duration::from_secs(30));
+        assert_eq!(
+            clamp_seek(Duration::from_secs(30), 60_000),
+            Duration::from_secs(30)
+        );
         // Unknown duration leaves the request untouched.
-        assert_eq!(clamp_seek(Duration::from_secs(30), 0), Duration::from_secs(30));
+        assert_eq!(
+            clamp_seek(Duration::from_secs(30), 0),
+            Duration::from_secs(30)
+        );
     }
 }

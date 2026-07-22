@@ -131,8 +131,8 @@ impl InspectorPanel {
     }
 
     fn on_selection_changed(&mut self, entries: &[FsEntry], cx: &mut Context<Self>) {
-        let single_file = (entries.len() == 1 && entries[0].kind == EntryKind::File)
-            .then(|| entries[0].clone());
+        let single_file =
+            (entries.len() == 1 && entries[0].kind == EntryKind::File).then(|| entries[0].clone());
         let Some(entry) = single_file else {
             self.loaded = None;
             self.loading_for = None;
@@ -166,7 +166,11 @@ impl InspectorPanel {
         // already resident — hand it over immediately, no decode, no spinner.
         let cache = PikuState::global(cx).preview_cache.clone();
         if let Some(content) = cache.update(cx, |c, _| c.get(&key)) {
-            self.loaded = Some(LoadedPreview { path, mtime, content });
+            self.loaded = Some(LoadedPreview {
+                path,
+                mtime,
+                content,
+            });
             self.loading_for = None;
             return;
         }
@@ -184,7 +188,11 @@ impl InspectorPanel {
                 let cache = PikuState::global(cx).preview_cache.clone();
                 cache.update(cx, |c, _| c.insert(key, content.clone()));
                 if this.generation == generation {
-                    this.loaded = Some(LoadedPreview { path, mtime, content });
+                    this.loaded = Some(LoadedPreview {
+                        path,
+                        mtime,
+                        content,
+                    });
                     this.loading_for = None;
                     cx.notify();
                 }
@@ -226,8 +234,8 @@ impl InspectorPanel {
 
         let has_loaded = entry.kind == EntryKind::File
             && self.loaded.as_ref().is_some_and(|l| l.path == entry.path);
-        let is_loading = entry.kind == EntryKind::File
-            && self.loading_for.as_ref() == Some(&entry.path);
+        let is_loading =
+            entry.kind == EntryKind::File && self.loading_for.as_ref() == Some(&entry.path);
 
         let preview: gpui::AnyElement = if has_loaded {
             super::preview_view::render_preview_box(self, window, cx)
@@ -272,12 +280,19 @@ impl InspectorPanel {
         }
         if let Some(loaded) = &self.loaded
             && loaded.path == entry.path
-            && let PreviewContent::Image { dimensions: Some((w, h)), .. } = &*loaded.content
+            && let PreviewContent::Image {
+                dimensions: Some((w, h)),
+                ..
+            } = &*loaded.content
         {
             details = details.child(Self::detail_row("Dimensions", format!("{w} × {h}"), cx));
         }
         details = details
-            .child(Self::detail_row("Modified", format_time(entry.modified), cx))
+            .child(Self::detail_row(
+                "Modified",
+                format_time(entry.modified),
+                cx,
+            ))
             .child(Self::detail_row("Created", format_time(entry.created), cx))
             .child(Self::detail_row("Location", path_text.clone(), cx));
 
@@ -423,33 +438,32 @@ impl InspectorPanel {
 
     /// Details ⇄ Git segmented toggle, shown only inside a repository.
     fn render_mode_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let segment = |label: &'static str,
-                       icon: gpui_component::Icon,
-                       mode: InspectorMode,
-                       active: bool| {
-            gpui_component::h_flex()
-                .id(label)
-                .px_2()
-                .py_0p5()
-                .gap_1()
-                .items_center()
-                .text_xs()
-                .rounded(cx.theme().radius)
-                .cursor_pointer()
-                .when(active, |s| {
-                    s.bg(cx.theme().list_active).text_color(cx.theme().foreground)
-                })
-                .when(!active, |s| {
-                    s.text_color(cx.theme().muted_foreground)
-                        .hover(|s| s.bg(cx.theme().list_hover))
-                })
-                .child(icon.size(px(12.)))
-                .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.mode = mode;
-                    cx.notify();
-                }))
-        };
+        let segment =
+            |label: &'static str, icon: gpui_component::Icon, mode: InspectorMode, active: bool| {
+                gpui_component::h_flex()
+                    .id(label)
+                    .px_2()
+                    .py_0p5()
+                    .gap_1()
+                    .items_center()
+                    .text_xs()
+                    .rounded(cx.theme().radius)
+                    .cursor_pointer()
+                    .when(active, |s| {
+                        s.bg(cx.theme().list_active)
+                            .text_color(cx.theme().foreground)
+                    })
+                    .when(!active, |s| {
+                        s.text_color(cx.theme().muted_foreground)
+                            .hover(|s| s.bg(cx.theme().list_hover))
+                    })
+                    .child(icon.size(px(12.)))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.mode = mode;
+                        cx.notify();
+                    }))
+            };
         gpui_component::h_flex()
             .gap_1()
             .px_3()

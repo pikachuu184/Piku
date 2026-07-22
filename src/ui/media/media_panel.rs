@@ -144,14 +144,23 @@ impl MediaPanel {
         // borrowed mutably by the transport widgets.
         let content = self.loaded.take();
         let element = match content.as_deref() {
-            Some(PreviewContent::Audio { rows, waveform, duration_ms }) => {
+            Some(PreviewContent::Audio {
+                rows,
+                waveform,
+                duration_ms,
+            }) => {
                 let meta = transport::track_meta_from(&path, rows, *duration_ms);
                 v_flex()
                     .w_full()
                     .gap_3()
                     .child(artwork(cx, PikuIcon::Music, 200.))
                     .child(transport::audio_transport(
-                        "mp-audio", &path, meta, waveform, *duration_ms, cx,
+                        "mp-audio",
+                        &path,
+                        meta,
+                        waveform,
+                        *duration_ms,
+                        cx,
                     ))
                     .child(rows_block(rows, cx))
                     .into_any_element()
@@ -197,8 +206,18 @@ fn rows_block(rows: &[(SharedString, SharedString)], cx: &Context<MediaPanel>) -
         .children(rows.iter().map(|(label, value)| {
             v_flex()
                 .gap_0p5()
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(label.clone()))
-                .child(div().text_sm().text_color(cx.theme().foreground).child(value.clone()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label.clone()),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().foreground)
+                        .child(value.clone()),
+                )
         }))
         .into_any_element()
 }
@@ -213,7 +232,11 @@ fn artwork(cx: &Context<MediaPanel>, icon: PikuIcon, height: f32) -> AnyElement 
         .justify_center()
         .rounded(cx.theme().radius)
         .bg(cx.theme().muted)
-        .child(Icon::new(icon).size(px(56.)).text_color(cx.theme().muted_foreground))
+        .child(
+            Icon::new(icon)
+                .size(px(56.))
+                .text_color(cx.theme().muted_foreground),
+        )
         .into_any_element()
 }
 
@@ -226,7 +249,12 @@ fn message(cx: &Context<MediaPanel>, text: &str) -> AnyElement {
         .justify_center()
         .rounded(cx.theme().radius)
         .bg(cx.theme().muted)
-        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(text.to_string()))
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(text.to_string()),
+        )
         .into_any_element()
 }
 
@@ -260,16 +288,23 @@ impl Panel for MediaPanel {
     }
 
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let is_video =
-            matches!(self.loaded.as_deref(), Some(PreviewContent::Video { .. }))
-                || self.path.as_ref().is_some_and(|p| {
-                    matches!(kind_for_path(p), crate::preview::PreviewKind::VideoMeta)
-                });
-        let icon = if is_video { PikuIcon::Film } else { PikuIcon::Music };
+        let is_video = matches!(self.loaded.as_deref(), Some(PreviewContent::Video { .. }))
+            || self.path.as_ref().is_some_and(|p| {
+                matches!(kind_for_path(p), crate::preview::PreviewKind::VideoMeta)
+            });
+        let icon = if is_video {
+            PikuIcon::Film
+        } else {
+            PikuIcon::Music
+        };
         h_flex()
             .gap_1()
             .items_center()
-            .child(Icon::new(icon).size(px(14.)).text_color(cx.theme().muted_foreground))
+            .child(
+                Icon::new(icon)
+                    .size(px(14.))
+                    .text_color(cx.theme().muted_foreground),
+            )
             .child(self.file_name())
     }
 

@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
+    App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, WindowExt as _,
@@ -76,9 +76,12 @@ impl NavPanel {
                 // Drives are known — refresh any stale per-category usage
                 // stats in the background (silent, cached, sequential).
                 let mounts: Vec<PathBuf> = this.drives.iter().map(|d| d.mount.clone()).collect();
-                PikuState::global(cx).drive_stats.clone().update(cx, |store, cx| {
-                    store.ensure_scans(mounts, cx);
-                });
+                PikuState::global(cx)
+                    .drive_stats
+                    .clone()
+                    .update(cx, |store, cx| {
+                        store.ensure_scans(mounts, cx);
+                    });
                 cx.notify();
             });
         })
@@ -126,7 +129,12 @@ impl NavPanel {
         let original = if create {
             String::new()
         } else {
-            PikuState::global(cx).workspaces.read(cx).active().name.clone()
+            PikuState::global(cx)
+                .workspaces
+                .read(cx)
+                .active()
+                .name
+                .clone()
         };
         let input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -189,10 +197,7 @@ impl NavPanel {
             // A freshly created workspace becomes active — the shell owns the
             // switch logic, so route through the global action.
             Ok(Some(new_id)) => {
-                window.dispatch_action(
-                    Box::new(crate::app::actions::SwitchWorkspace(new_id)),
-                    cx,
-                );
+                window.dispatch_action(Box::new(crate::app::actions::SwitchWorkspace(new_id)), cx);
             }
             Ok(None) => {}
             Err(error) => {
@@ -381,30 +386,34 @@ impl Render for NavPanel {
         let favorites_content = if favorites.is_empty() {
             v_flex().child(empty_hint("No favorites yet", cx))
         } else {
-            v_flex()
-                .gap_0p5()
-                .children(self.rows_for_paths("fav", |_| Icon::new(IconName::Star), favorites.iter(), cx))
+            v_flex().gap_0p5().children(self.rows_for_paths(
+                "fav",
+                |_| Icon::new(IconName::Star),
+                favorites.iter(),
+                cx,
+            ))
         };
 
         let pinned_content = if pinned.is_empty() {
             v_flex().child(empty_hint("Nothing pinned", cx))
         } else {
-            v_flex()
-                .gap_0p5()
-                .children(self.rows_for_paths("pin", |_| Icon::new(PikuIcon::Pin), pinned.iter(), cx))
+            v_flex().gap_0p5().children(self.rows_for_paths(
+                "pin",
+                |_| Icon::new(PikuIcon::Pin),
+                pinned.iter(),
+                cx,
+            ))
         };
 
         let recents_content = if recents.is_empty() {
             v_flex().child(empty_hint("No recent locations", cx))
         } else {
-            v_flex()
-                .gap_0p5()
-                .children(self.rows_for_paths(
-                    "recent",
-                    |_| Icon::new(PikuIcon::Clock),
-                    recents.iter(),
-                    cx,
-                ))
+            v_flex().gap_0p5().children(self.rows_for_paths(
+                "recent",
+                |_| Icon::new(PikuIcon::Clock),
+                recents.iter(),
+                cx,
+            ))
         };
 
         let drives_content = if !self.drives_loaded {
@@ -451,51 +460,56 @@ impl Render for NavPanel {
             .bg(cx.theme().sidebar)
             .child(super::workspace_switcher::workspace_switcher(self, cx))
             .child(
-                div().id("nav-scroll").flex_1().min_h_0().overflow_y_scroll().child(
-                    v_flex()
-                        .py_2()
-                        .gap_2()
-                        .child(section(
-                            "sec-places",
-                            "Places",
-                            self.is_open("places", cx),
-                            cx.listener(|this, _, _, cx| this.toggle("places", cx)),
-                            places_content,
-                            cx,
-                        ))
-                        .child(section(
-                            "sec-favorites",
-                            "Favorites",
-                            self.is_open("favorites", cx),
-                            cx.listener(|this, _, _, cx| this.toggle("favorites", cx)),
-                            favorites_content,
-                            cx,
-                        ))
-                        .child(section(
-                            "sec-pinned",
-                            "Pinned",
-                            self.is_open("pinned", cx),
-                            cx.listener(|this, _, _, cx| this.toggle("pinned", cx)),
-                            pinned_content,
-                            cx,
-                        ))
-                        .child(section(
-                            "sec-recents",
-                            "Recents",
-                            self.is_open("recents", cx),
-                            cx.listener(|this, _, _, cx| this.toggle("recents", cx)),
-                            recents_content,
-                            cx,
-                        ))
-                        .child(section(
-                            "sec-drives",
-                            "Drives",
-                            self.is_open("drives", cx),
-                            cx.listener(|this, _, _, cx| this.toggle("drives", cx)),
-                            drives_content,
-                            cx,
-                        )),
-                ),
+                div()
+                    .id("nav-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .py_2()
+                            .gap_2()
+                            .child(section(
+                                "sec-places",
+                                "Places",
+                                self.is_open("places", cx),
+                                cx.listener(|this, _, _, cx| this.toggle("places", cx)),
+                                places_content,
+                                cx,
+                            ))
+                            .child(section(
+                                "sec-favorites",
+                                "Favorites",
+                                self.is_open("favorites", cx),
+                                cx.listener(|this, _, _, cx| this.toggle("favorites", cx)),
+                                favorites_content,
+                                cx,
+                            ))
+                            .child(section(
+                                "sec-pinned",
+                                "Pinned",
+                                self.is_open("pinned", cx),
+                                cx.listener(|this, _, _, cx| this.toggle("pinned", cx)),
+                                pinned_content,
+                                cx,
+                            ))
+                            .child(section(
+                                "sec-recents",
+                                "Recents",
+                                self.is_open("recents", cx),
+                                cx.listener(|this, _, _, cx| this.toggle("recents", cx)),
+                                recents_content,
+                                cx,
+                            ))
+                            .child(section(
+                                "sec-drives",
+                                "Drives",
+                                self.is_open("drives", cx),
+                                cx.listener(|this, _, _, cx| this.toggle("drives", cx)),
+                                drives_content,
+                                cx,
+                            )),
+                    ),
             )
     }
 }

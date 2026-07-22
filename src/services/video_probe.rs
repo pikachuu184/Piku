@@ -112,7 +112,10 @@ pub fn save_frame_png(path: &Path, at_ms: u64) -> Option<PathBuf> {
     let dir = dirs::cache_dir()?.join("piku").join("screenshots");
     std::fs::create_dir_all(&dir).ok()?;
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
     let dest = dir.join(format!("{stem}-{ts}.png"));
     std::fs::write(&dest, &png).ok()?;
     Some(dest)
@@ -224,7 +227,10 @@ pub fn mp4_metadata(path: &Path) -> Option<Vec<(SharedString, SharedString)>> {
 
     let mut rows: Vec<(SharedString, SharedString)> = Vec::new();
     let secs = mp4.duration().as_secs();
-    rows.push(("Duration".into(), format!("{}:{:02}", secs / 60, secs % 60).into()));
+    rows.push((
+        "Duration".into(),
+        format!("{}:{:02}", secs / 60, secs % 60).into(),
+    ));
 
     for track in mp4.tracks().values() {
         match track.track_type() {

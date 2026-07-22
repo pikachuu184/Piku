@@ -38,13 +38,11 @@ impl NavModel {
 
         let guard = crate::storage::local();
         let guard = guard.guard();
-        let before =
-            model.favorites.len() + model.pinned.len() + model.recents.len();
+        let before = model.favorites.len() + model.pinned.len() + model.recents.len();
         model.favorites.retain(|p| guard.sanitize(p).is_ok());
         model.pinned.retain(|p| guard.sanitize(p).is_ok());
         model.recents.retain(|p| guard.sanitize(p).is_ok());
-        let dropped =
-            before - (model.favorites.len() + model.pinned.len() + model.recents.len());
+        let dropped = before - (model.favorites.len() + model.pinned.len() + model.recents.len());
         if dropped > 0 {
             tracing::warn!("dropped {dropped} unauthorized path(s) restoring navigation state");
         }

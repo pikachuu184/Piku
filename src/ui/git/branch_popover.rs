@@ -11,7 +11,9 @@ use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, input::InputState, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, input::InputState, v_flex,
+};
 
 use crate::security::git_text::validate_branch_name;
 use crate::services::git::types::BranchInfo;
@@ -36,8 +38,7 @@ pub struct BranchPopover {
 
 impl BranchPopover {
     pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let create_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("New branch name…"));
+        let create_input = cx.new(|cx| InputState::new(window, cx).placeholder("New branch name…"));
         let git = PikuState::global(cx).git.clone();
         let git_sub = cx.observe(&git, |this: &mut Self, git, cx| {
             // Reload only when something branch-shaped actually changed —
@@ -228,15 +229,13 @@ impl Render for BranchPopover {
                     .cursor_pointer()
                     .when(is_head, |s| s.bg(cx.theme().list_active))
                     .when(!is_head, |s| s.hover(|s| s.bg(cx.theme().list_hover)))
-                    .child(
-                        div().w(px(14.)).flex_none().when(is_head, |slot| {
-                            slot.child(
-                                Icon::new(IconName::Check)
-                                    .size(px(12.))
-                                    .text_color(cx.theme().foreground),
-                            )
-                        }),
-                    )
+                    .child(div().w(px(14.)).flex_none().when(is_head, |slot| {
+                        slot.child(
+                            Icon::new(IconName::Check)
+                                .size(px(12.))
+                                .text_color(cx.theme().foreground),
+                        )
+                    }))
                     .child(
                         v_flex()
                             .flex_1()
@@ -282,18 +281,14 @@ impl Render for BranchPopover {
                                     }
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if this.confirm_delete.as_deref()
-                                        == Some(delete_name.as_str())
+                                    if this.confirm_delete.as_deref() == Some(delete_name.as_str())
                                     {
                                         this.confirm_delete = None;
                                         let root = this.root.clone();
                                         let name = delete_name.clone();
-                                        PikuState::global(cx)
-                                            .git
-                                            .clone()
-                                            .update(cx, |git, cx| {
-                                                git.delete_branch(root, name, cx)
-                                            });
+                                        PikuState::global(cx).git.clone().update(cx, |git, cx| {
+                                            git.delete_branch(root, name, cx)
+                                        });
                                     } else {
                                         this.confirm_delete = Some(delete_name.clone());
                                     }

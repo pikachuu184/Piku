@@ -15,17 +15,18 @@ impl DirWatcher {
     /// the returned channel.
     pub fn watch(dir: &Path) -> anyhow::Result<(Self, UnboundedReceiver<()>)> {
         let (tx, rx) = unbounded::<()>();
-        let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-            if let Ok(event) = result {
-                use notify::EventKind;
-                if matches!(
-                    event.kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                ) {
-                    let _ = tx.unbounded_send(());
+        let mut watcher =
+            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                if let Ok(event) = result {
+                    use notify::EventKind;
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    ) {
+                        let _ = tx.unbounded_send(());
+                    }
                 }
-            }
-        })?;
+            })?;
         watcher.watch(dir, RecursiveMode::NonRecursive)?;
         Ok((Self { _watcher: watcher }, rx))
     }

@@ -62,7 +62,11 @@ impl ThumbKey {
             .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        Self { path: entry.path.clone(), mtime, target }
+        Self {
+            path: entry.path.clone(),
+            mtime,
+            target,
+        }
     }
 }
 

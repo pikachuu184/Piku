@@ -17,9 +17,10 @@ use crate::state::PikuState;
 /// so navigation never spawns extra windows or panes.
 pub fn navigate_active(path: PathBuf, window: &mut Window, cx: &mut App) {
     if let Some(weak) = PikuState::global(cx).active_explorer()
-        && let Some(panel) = weak.upgrade() {
-            panel.update(cx, |panel, cx| {
-                panel.navigate_to(path, window, cx);
-            });
-        }
+        && let Some(panel) = weak.upgrade()
+    {
+        panel.update(cx, |panel, cx| {
+            panel.navigate_to(path, window, cx);
+        });
+    }
 }

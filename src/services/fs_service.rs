@@ -64,9 +64,10 @@ pub fn known_places() -> Vec<Place> {
     let mut places = Vec::new();
     let mut push = |kind, name: &'static str, path: Option<PathBuf>| {
         if let Some(path) = path
-            && path.exists() {
-                places.push(Place { kind, name, path });
-            }
+            && path.exists()
+        {
+            places.push(Place { kind, name, path });
+        }
     };
     push(PlaceKind::Home, "Home", dirs::home_dir());
     push(PlaceKind::Desktop, "Desktop", dirs::desktop_dir());

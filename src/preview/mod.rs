@@ -112,9 +112,7 @@ pub fn kind_for_ext(ext: &str) -> PreviewKind {
         FileCategory::Code => PreviewKind::Code,
         // Plain-text documents preview as text; binary docs (pdf/docx/…)
         // fall through to hex until a dedicated provider exists.
-        FileCategory::Document if matches!(ext, "txt" | "log" | "csv" | "rtf") => {
-            PreviewKind::Code
-        }
+        FileCategory::Document if matches!(ext, "txt" | "log" | "csv" | "rtf") => PreviewKind::Code,
         _ => PreviewKind::Hex,
     }
 }

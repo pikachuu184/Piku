@@ -93,7 +93,11 @@ fn render_pages(bytes: &[u8]) -> Result<PreviewContent, PdfError> {
 
     let note = (total_pages > render_count)
         .then(|| format!("Showing the first {render_count} of {total_pages} pages.").into());
-    Ok(PreviewContent::Pdf { pages, total_pages, note })
+    Ok(PreviewContent::Pdf {
+        pages,
+        total_pages,
+        note,
+    })
 }
 
 /// Bind to a pdfium library shipped next to the executable, else a system one.
@@ -145,11 +149,16 @@ startxref\n\
         }
 
         match render_pages(MINIMAL_PDF) {
-            Ok(PreviewContent::Pdf { pages, total_pages, .. }) => {
+            Ok(PreviewContent::Pdf {
+                pages, total_pages, ..
+            }) => {
                 assert_eq!(total_pages, 1, "expected a single-page document");
                 assert_eq!(pages.len(), 1, "expected one rendered page image");
             }
-            Ok(other) => panic!("unexpected preview content: {:?}", std::mem::discriminant(&other)),
+            Ok(other) => panic!(
+                "unexpected preview content: {:?}",
+                std::mem::discriminant(&other)
+            ),
             Err(_) => panic!("pdfium is present but rendering the minimal PDF failed"),
         }
     }

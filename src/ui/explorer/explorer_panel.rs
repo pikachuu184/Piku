@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use gpui::ScrollStrategy;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -21,7 +22,6 @@ use gpui_component::{
     menu::{ContextMenuExt as _, PopupMenu},
     v_flex,
 };
-use gpui::ScrollStrategy;
 
 use crate::services::search::{self, SearchUpdate};
 
@@ -333,13 +333,16 @@ impl ExplorerPanel {
         let keep: Vec<PathBuf> = if reset_selection {
             Vec::new()
         } else {
-            self.selected_entries().iter().map(|e| e.path.clone()).collect()
+            self.selected_entries()
+                .iter()
+                .map(|e| e.path.clone())
+                .collect()
         };
 
         let path = self.session.cwd.clone();
-        let task = cx.background_executor().spawn(async move {
-            crate::storage::local().list(&path)
-        });
+        let task = cx
+            .background_executor()
+            .spawn(async move { crate::storage::local().list(&path) });
 
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -362,7 +365,8 @@ impl ExplorerPanel {
                                 let restore = std::mem::take(&mut this.pending_selection);
                                 this.restore_selection(&restore, cx);
                                 this.scroll.scroll_to_item(
-                                    this.restore_scroll.min(this.entries.len().saturating_sub(1)),
+                                    this.restore_scroll
+                                        .min(this.entries.len().saturating_sub(1)),
                                     ScrollStrategy::Top,
                                 );
                                 this.restore_scroll = 0;
@@ -413,11 +417,16 @@ impl ExplorerPanel {
                     SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                     SortBy::Size => a.size.cmp(&b.size),
                     SortBy::Modified => a.modified.cmp(&b.modified),
-                    SortBy::Type => a.ext.cmp(&b.ext).then_with(|| {
-                        a.name.to_lowercase().cmp(&b.name.to_lowercase())
-                    }),
+                    SortBy::Type => a
+                        .ext
+                        .cmp(&b.ext)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
                 };
-                if ascending { ordering } else { ordering.reverse() }
+                if ascending {
+                    ordering
+                } else {
+                    ordering.reverse()
+                }
             })
         });
 
@@ -514,8 +523,9 @@ impl ExplorerPanel {
         } else {
             "Filter…"
         };
-        self.filter_input
-            .update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
+        self.filter_input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, window, cx)
+        });
         if self.session.search_deep {
             self.session.search_query = text;
             self.run_search(cx);
@@ -618,12 +628,15 @@ impl ExplorerPanel {
         let dir = self.session.cwd.clone();
         let count = self.entries.len();
         let entries = self.selected_entries();
-        PikuState::global(cx).selection.clone().update(cx, |selection, cx| {
-            selection.dir = Some(dir);
-            selection.dir_items = count;
-            selection.entries = entries;
-            cx.notify();
-        });
+        PikuState::global(cx)
+            .selection
+            .clone()
+            .update(cx, |selection, cx| {
+                selection.dir = Some(dir);
+                selection.dir_items = count;
+                selection.entries = entries;
+                cx.notify();
+            });
     }
 
     pub(super) fn click_select(
@@ -642,7 +655,11 @@ impl ExplorerPanel {
             self.anchor = Some(ix);
         } else if modifiers.shift {
             let anchor = self.anchor.unwrap_or(ix);
-            let (from, to) = if anchor <= ix { (anchor, ix) } else { (ix, anchor) };
+            let (from, to) = if anchor <= ix {
+                (anchor, ix)
+            } else {
+                (ix, anchor)
+            };
             self.selected = (from..=to).collect();
         } else {
             self.selected.clear();
@@ -667,9 +684,7 @@ impl ExplorerPanel {
         if self.entries.is_empty() {
             return;
         }
-        let current = self
-            .anchor
-            .or_else(|| self.selected.iter().next().copied());
+        let current = self.anchor.or_else(|| self.selected.iter().next().copied());
         let next = match current {
             Some(ix) => (ix as isize + delta).clamp(0, self.entries.len() as isize - 1) as usize,
             None => 0,
@@ -722,15 +737,22 @@ impl ExplorerPanel {
     // -- Clipboard / operations -------------------------------------------
 
     fn copy_selection(&mut self, cut: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let paths: Vec<PathBuf> = self.selected_entries().iter().map(|e| e.path.clone()).collect();
+        let paths: Vec<PathBuf> = self
+            .selected_entries()
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
         if paths.is_empty() {
             return;
         }
         let count = paths.len();
-        PikuState::global(cx).clipboard.clone().update(cx, |clipboard, _| {
-            clipboard.paths = paths;
-            clipboard.cut = cut;
-        });
+        PikuState::global(cx)
+            .clipboard
+            .clone()
+            .update(cx, |clipboard, _| {
+                clipboard.paths = paths;
+                clipboard.cut = cut;
+            });
         window.push_notification(
             crate::ui::toast::info(format!(
                 "{} {count} item{} — paste with Ctrl+V",
@@ -910,7 +932,11 @@ impl ExplorerPanel {
         self.start_inline_edit(
             InlineEditKind::Create { directory },
             "",
-            if directory { "Folder name" } else { "File name" },
+            if directory {
+                "Folder name"
+            } else {
+                "File name"
+            },
             window,
             cx,
         );
@@ -1021,7 +1047,12 @@ impl ExplorerPanel {
 
     // -- Action handlers ---------------------------------------------------
 
-    fn on_toggle_hidden(&mut self, _: &actions::ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_hidden(
+        &mut self,
+        _: &actions::ToggleHidden,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let settings = PikuState::global(cx).settings.clone();
         settings.update(cx, |settings, cx| {
             settings.show_hidden = !settings.show_hidden;
@@ -1080,7 +1111,10 @@ impl ExplorerPanel {
         session.selection = if self.searching {
             Vec::new()
         } else {
-            self.selected_entries().iter().map(|e| e.path.clone()).collect()
+            self.selected_entries()
+                .iter()
+                .map(|e| e.path.clone())
+                .collect()
         };
         session.scroll_first = self.scroll.base_handle().top_item();
         session
@@ -1100,9 +1134,17 @@ impl ExplorerPanel {
     /// row is part of it, otherwise just that row.
     pub(super) fn drag_paths(&self, ix: usize) -> Vec<PathBuf> {
         if self.selected.contains(&ix) && self.selected.len() > 1 {
-            self.selected_entries().iter().map(|e| e.path.clone()).collect()
+            self.selected_entries()
+                .iter()
+                .map(|e| e.path.clone())
+                .collect()
         } else {
-            self.entries.get(ix).map(|e| vec![e.path.clone()]).into_iter().flatten().collect()
+            self.entries
+                .get(ix)
+                .map(|e| vec![e.path.clone()])
+                .into_iter()
+                .flatten()
+                .collect()
         }
     }
 
@@ -1170,7 +1212,11 @@ impl Render for ExplorerPanel {
             let filtered = !self.filter_input.read(cx).value().is_empty();
             empty_state(
                 Icon::new(IconName::FolderOpen),
-                if filtered { "No matches" } else { "This folder is empty" },
+                if filtered {
+                    "No matches"
+                } else {
+                    "This folder is empty"
+                },
                 if filtered {
                     "Nothing here matches the filter"
                 } else {
@@ -1191,20 +1237,44 @@ impl Render for ExplorerPanel {
             .bg(cx.theme().background)
             .key_context(actions::EXPLORER_CONTEXT)
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &actions::NavigateBack, window, cx| this.go_back(window, cx)))
-            .on_action(cx.listener(|this, _: &actions::NavigateForward, window, cx| this.go_forward(window, cx)))
-            .on_action(cx.listener(|this, _: &actions::NavigateUp, window, cx| this.go_up(window, cx)))
-            .on_action(cx.listener(|this, _: &actions::RefreshPane, window, cx| this.reload(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &actions::NavigateBack, window, cx| this.go_back(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::NavigateForward, window, cx| {
+                    this.go_forward(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::NavigateUp, window, cx| this.go_up(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::RefreshPane, window, cx| this.reload(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &actions::FocusFilter, window, cx| {
-                this.filter_input.clone().update(cx, |input, cx| input.focus(window, cx));
+                this.filter_input
+                    .clone()
+                    .update(cx, |input, cx| input.focus(window, cx));
             }))
-            .on_action(cx.listener(|this, _: &actions::CopySelection, window, cx| this.copy_selection(false, window, cx)))
-            .on_action(cx.listener(|this, _: &actions::CutSelection, window, cx| this.copy_selection(true, window, cx)))
-            .on_action(cx.listener(|this, _: &actions::PasteClipboard, window, cx| this.paste(window, cx)))
-            .on_action(cx.listener(|this, _: &actions::DeleteSelection, window, cx| this.delete_selection(window, cx)))
-            .on_action(cx.listener(|this, _: &actions::RenameSelection, window, cx| {
-                this.start_rename(window, cx);
+            .on_action(cx.listener(|this, _: &actions::CopySelection, window, cx| {
+                this.copy_selection(false, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &actions::CutSelection, window, cx| {
+                this.copy_selection(true, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &actions::PasteClipboard, window, cx| this.paste(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::DeleteSelection, window, cx| {
+                    this.delete_selection(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::RenameSelection, window, cx| {
+                    this.start_rename(window, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &actions::NewFolder, window, cx| {
                 this.start_create(true, window, cx);
             }))
@@ -1223,29 +1293,47 @@ impl Render for ExplorerPanel {
                 this.push_selection_ctx(cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &actions::SelectNext, _, cx| this.move_selection(1, cx)))
-            .on_action(cx.listener(|this, _: &actions::SelectPrev, _, cx| this.move_selection(-1, cx)))
+            .on_action(
+                cx.listener(|this, _: &actions::SelectNext, _, cx| this.move_selection(1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::SelectPrev, _, cx| this.move_selection(-1, cx)),
+            )
             .on_action(cx.listener(|this, action: &actions::SortByName, _, cx| {
                 let _ = action;
                 this.set_sort(SortBy::Name, cx);
             }))
-            .on_action(cx.listener(|this, _: &actions::SortBySize, _, cx| this.set_sort(SortBy::Size, cx)))
-            .on_action(cx.listener(|this, _: &actions::SortByModified, _, cx| this.set_sort(SortBy::Modified, cx)))
-            .on_action(cx.listener(|this, _: &actions::SortByType, _, cx| this.set_sort(SortBy::Type, cx)))
+            .on_action(
+                cx.listener(|this, _: &actions::SortBySize, _, cx| this.set_sort(SortBy::Size, cx)),
+            )
+            .on_action(cx.listener(|this, _: &actions::SortByModified, _, cx| {
+                this.set_sort(SortBy::Modified, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &actions::SortByType, _, cx| this.set_sort(SortBy::Type, cx)),
+            )
             .on_action(cx.listener(|this, _: &actions::FavoriteSelection, _, cx| {
                 if let Some(entry) = this.selected_entries().first() {
                     let path = entry.path.clone();
-                    PikuState::global(cx).nav.clone().update(cx, |nav, cx| nav.toggle_favorite(path, cx));
+                    PikuState::global(cx)
+                        .nav
+                        .clone()
+                        .update(cx, |nav, cx| nav.toggle_favorite(path, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &actions::PinSelection, _, cx| {
                 if let Some(entry) = this.selected_entries().first() {
                     let path = entry.path.clone();
-                    PikuState::global(cx).nav.clone().update(cx, |nav, cx| nav.toggle_pinned(path, cx));
+                    PikuState::global(cx)
+                        .nav
+                        .clone()
+                        .update(cx, |nav, cx| nav.toggle_pinned(path, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &actions::ZoomIn, _, cx| this.zoom_by(ZOOM_STEP, cx)))
-            .on_action(cx.listener(|this, _: &actions::ZoomOut, _, cx| this.zoom_by(-ZOOM_STEP, cx)))
+            .on_action(
+                cx.listener(|this, _: &actions::ZoomOut, _, cx| this.zoom_by(-ZOOM_STEP, cx)),
+            )
             .on_action(cx.listener(|this, _: &actions::ResetZoom, _, cx| this.set_zoom(1.0, cx)))
             .child(self.render_toolbar(window, cx))
             .children(match &self.inline_edit {
@@ -1272,10 +1360,12 @@ impl Render for ExplorerPanel {
                         let is_move = !window.modifiers().control;
                         this.drop_into(dragged.paths.clone(), dest, is_move, window, cx);
                     }))
-                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
-                        let dest = this.session.cwd.clone();
-                        this.drop_external(paths.paths().to_vec(), dest, window, cx);
-                    }))
+                    .on_drop(
+                        cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                            let dest = this.session.cwd.clone();
+                            this.drop_external(paths.paths().to_vec(), dest, window, cx);
+                        }),
+                    )
                     .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
                         if !event.modifiers.control {
                             return;
@@ -1293,9 +1383,16 @@ impl Render for ExplorerPanel {
                     }))
                     .context_menu({
                         let has_selection = !self.selected.is_empty();
-                        let has_clipboard = !PikuState::global(cx).clipboard.read(cx).paths.is_empty();
+                        let has_clipboard =
+                            !PikuState::global(cx).clipboard.read(cx).paths.is_empty();
                         move |menu, window, cx| {
-                            super::context_menu::build(menu, has_selection, has_clipboard, window, cx)
+                            super::context_menu::build(
+                                menu,
+                                has_selection,
+                                has_clipboard,
+                                window,
+                                cx,
+                            )
                         }
                     })
                     .child(content),
@@ -1339,11 +1436,7 @@ impl Panel for ExplorerPanel {
 
     /// Pin/search/branch badges after the tab label. Kept cheap — this runs
     /// on every tab render (branch lookup is two HashMap reads).
-    fn title_suffix(
-        &mut self,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
+    fn title_suffix(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         // Active branch of the repository this pane is inside, if any —
         // "the active branch appears inside repository tabs".
         let branch: Option<String> = {

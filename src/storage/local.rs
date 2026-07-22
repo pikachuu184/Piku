@@ -92,7 +92,12 @@ impl StorageProvider for LocalProvider {
             &path,
             None,
             result.is_ok(),
-            result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+            result
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+                .as_str(),
         );
         result
     }
@@ -111,7 +116,12 @@ impl StorageProvider for LocalProvider {
             &path,
             None,
             result.is_ok(),
-            result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+            result
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+                .as_str(),
         );
         result
     }
@@ -133,7 +143,12 @@ impl StorageProvider for LocalProvider {
             &from,
             Some(&to),
             result.is_ok(),
-            result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+            result
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+                .as_str(),
         );
         result
     }
@@ -196,7 +211,12 @@ impl StorageProvider for LocalProvider {
                 path,
                 None,
                 result.is_ok(),
-                result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+                result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default()
+                    .as_str(),
             );
         }
         result
@@ -215,7 +235,12 @@ impl StorageProvider for LocalProvider {
             &path,
             None,
             result.is_ok(),
-            result.as_ref().err().map(|e| e.to_string()).unwrap_or_default().as_str(),
+            result
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+                .as_str(),
         );
         result
     }

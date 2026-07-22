@@ -60,7 +60,11 @@ impl PreviewKey {
     /// simply decodes without caching rather than keying on bad metadata.
     pub fn for_path(path: &Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
-        Some(Self::new(path.to_path_buf(), meta.modified().ok(), meta.len()))
+        Some(Self::new(
+            path.to_path_buf(),
+            meta.modified().ok(),
+            meta.len(),
+        ))
     }
 }
 
@@ -121,13 +125,18 @@ impl PreviewCache {
 /// exclusions are error/too-large sentinels (trivial to recompute and pointless
 /// to pin) — image-heavy content is allowed but bounded by [`BYTE_BUDGET`].
 fn cacheable(content: &PreviewContent) -> bool {
-    !matches!(content, PreviewContent::Error(_) | PreviewContent::TooLarge { .. })
+    !matches!(
+        content,
+        PreviewContent::Error(_) | PreviewContent::TooLarge { .. }
+    )
 }
 
 /// A conservative resident-size estimate, used only for eviction accounting.
 fn estimated_bytes(content: &PreviewContent) -> usize {
     match content {
-        PreviewContent::Video { poster: Some(_), .. } => IMAGE_BYTES_EST,
+        PreviewContent::Video {
+            poster: Some(_), ..
+        } => IMAGE_BYTES_EST,
         PreviewContent::Pdf { pages, .. } => pages.len() * IMAGE_BYTES_EST,
         PreviewContent::Code { text, .. }
         | PreviewContent::Markdown { source: text, .. }
@@ -152,7 +161,11 @@ mod tests {
     }
 
     fn key(name: &str, mtime: u64) -> PreviewKey {
-        PreviewKey { path: PathBuf::from(name), mtime, size: 1 }
+        PreviewKey {
+            path: PathBuf::from(name),
+            mtime,
+            size: 1,
+        }
     }
 
     #[test]
@@ -181,7 +194,11 @@ mod tests {
         // The very first inserts should have been evicted.
         assert!(cache.get(&key("f0.mp3", 1)).is_none());
         // The most recent should survive.
-        assert!(cache.get(&key(&format!("f{}.mp3", CACHE_CAP + 4), 1)).is_some());
+        assert!(
+            cache
+                .get(&key(&format!("f{}.mp3", CACHE_CAP + 4), 1))
+                .is_some()
+        );
     }
 
     #[test]

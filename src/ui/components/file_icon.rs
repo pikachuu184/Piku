@@ -43,11 +43,7 @@ pub fn entry_icon(entry: &FsEntry, cx: &App) -> Icon {
 /// available for an image, otherwise the monochrome category glyph. `box_px`
 /// is the square edge the visual occupies. Requesting a decode is idempotent,
 /// and the panel re-renders (via its observe on the cache) when it lands.
-pub fn entry_visual<V: 'static>(
-    entry: &FsEntry,
-    box_px: f32,
-    cx: &mut Context<V>,
-) -> AnyElement {
+pub fn entry_visual<V: 'static>(entry: &FsEntry, box_px: f32, cx: &mut Context<V>) -> AnyElement {
     // Raster images decode directly; videos get an ffmpeg poster frame (which
     // silently falls back to the glyph when ffmpeg is unavailable). SVGs are
     // drawn by gpui itself and the `image` crate cannot size them, so they keep

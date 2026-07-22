@@ -190,18 +190,13 @@ pub fn drive_tile(drive: &DriveInfo, cx: &App) -> Div {
                 ),
         );
 
-    v_flex()
-        .items_center()
-        .gap_1()
-        .p_1()
-        .child(ring)
-        .child(
-            div()
-                .max_w(px(96.))
-                .text_xs()
-                .text_center()
-                .truncate()
-                .text_color(cx.theme().sidebar_foreground)
-                .child(drive.name.clone()),
-        )
+    v_flex().items_center().gap_1().p_1().child(ring).child(
+        div()
+            .max_w(px(96.))
+            .text_xs()
+            .text_center()
+            .truncate()
+            .text_color(cx.theme().sidebar_foreground)
+            .child(drive.name.clone()),
+    )
 }

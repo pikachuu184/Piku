@@ -59,13 +59,13 @@ impl JobQueue {
         if sources.is_empty() {
             return;
         }
-        let kind = if is_move { JobKind::Move } else { JobKind::Copy };
+        let kind = if is_move {
+            JobKind::Move
+        } else {
+            JobKind::Copy
+        };
         let title = if sources.len() == 1 {
-            format!(
-                "{} “{}”",
-                kind.label(),
-                file_label(&sources[0])
-            )
+            format!("{} “{}”", kind.label(), file_label(&sources[0]))
         } else {
             format!("{} {} items", kind.label(), sources.len())
         };
@@ -158,12 +158,7 @@ impl JobQueue {
         });
     }
 
-    pub fn submit_new_file(
-        &mut self,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn submit_new_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
             && let Err(error) = validate_name(&name)
         {
@@ -411,7 +406,9 @@ fn copy_work(
 
         if is_move && same_volume(source, &dest_dir) {
             // Stat before the rename — afterwards the source no longer exists.
-            let size = std::fs::symlink_metadata(source).map(|m| m.len()).unwrap_or(0);
+            let size = std::fs::symlink_metadata(source)
+                .map(|m| m.len())
+                .unwrap_or(0);
             match provider.rename(source, &target) {
                 Ok(()) => {
                     moved_fast += 1;
@@ -430,14 +427,13 @@ fn copy_work(
         match copy_recursive(provider.as_ref(), &guard, source, &target, &tx, &cancel) {
             Ok(items) => {
                 copied += items;
-                if is_move
-                    && let Err(error) = remove_recursive(provider.as_ref(), &guard, source) {
-                        result = Err(format!(
-                            "Copied, but could not remove source “{}”: {error}",
-                            file_label(source)
-                        ));
-                        break;
-                    }
+                if is_move && let Err(error) = remove_recursive(provider.as_ref(), &guard, source) {
+                    result = Err(format!(
+                        "Copied, but could not remove source “{}”: {error}",
+                        file_label(source)
+                    ));
+                    break;
+                }
             }
             Err(error) => {
                 result = Err(error);
@@ -503,8 +499,8 @@ fn copy_recursive(
     if guard.sanitize(source).is_err() || guard.sanitize(target).is_err() {
         return Ok(0);
     }
-    let metadata =
-        std::fs::symlink_metadata(source).map_err(|error| format!("{}: {error}", source.display()))?;
+    let metadata = std::fs::symlink_metadata(source)
+        .map_err(|error| format!("{}: {error}", source.display()))?;
 
     if metadata.is_symlink() {
         // Skipped by policy; counts as a completed item so totals stay honest.
@@ -533,7 +529,14 @@ fn copy_recursive(
             let Some(name) = child_source.file_name() else {
                 continue;
             };
-            items += copy_recursive(provider, guard, &child_source, &target.join(name), tx, cancel)?;
+            items += copy_recursive(
+                provider,
+                guard,
+                &child_source,
+                &target.join(name),
+                tx,
+                cancel,
+            )?;
         }
         return Ok(items);
     }
@@ -613,9 +616,9 @@ fn unique_destination(guard: &PathGuard, wanted: &Path) -> PathBuf {
 
 fn same_volume(a: &Path, b: &Path) -> bool {
     fn volume(path: &Path) -> Option<String> {
-        path.components().next().map(|component| {
-            component.as_os_str().to_string_lossy().to_lowercase()
-        })
+        path.components()
+            .next()
+            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
     }
     volume(a).is_some() && volume(a) == volume(b)
 }

@@ -48,7 +48,10 @@ fn load_image(path: &Path, ext: &str) -> PreviewContent {
     // gpui renders SVG natively and the `image` crate cannot size it —
     // hand the path over without a header probe.
     if ext == "svg" {
-        return PreviewContent::Image { path: path.to_path_buf(), dimensions: None };
+        return PreviewContent::Image {
+            path: path.to_path_buf(),
+            dimensions: None,
+        };
     }
     let (file, total) = match crate::storage::local().open_read(path) {
         Ok(pair) => pair,
@@ -66,7 +69,10 @@ fn load_image(path: &Path, ext: &str) -> PreviewContent {
             return PreviewContent::TooLarge { size: total };
         }
     }
-    PreviewContent::Image { path: path.to_path_buf(), dimensions }
+    PreviewContent::Image {
+        path: path.to_path_buf(),
+        dimensions,
+    }
 }
 
 fn load_code(path: &Path, ext: &str) -> PreviewContent {
@@ -151,7 +157,11 @@ fn load_archive(path: &Path) -> PreviewContent {
             is_dir: entry.is_dir(),
         });
     }
-    PreviewContent::Archive { entries, total_count, truncated: total_count > listed }
+    PreviewContent::Archive {
+        entries,
+        total_count,
+        truncated: total_count > listed,
+    }
 }
 
 fn load_audio_meta(path: &Path) -> PreviewContent {
@@ -191,7 +201,10 @@ fn load_audio_meta(path: &Path) -> PreviewContent {
     let properties = tagged.properties();
     let duration = properties.duration();
     let seconds = duration.as_secs();
-    rows.push(("Duration".into(), format!("{}:{:02}", seconds / 60, seconds % 60).into()));
+    rows.push((
+        "Duration".into(),
+        format!("{}:{:02}", seconds / 60, seconds % 60).into(),
+    ));
     if let Some(bitrate) = properties.overall_bitrate() {
         rows.push(("Bitrate".into(), format!("{bitrate} kbps").into()));
     }
@@ -346,7 +359,10 @@ fn load_hex(path: &Path) -> PreviewContent {
     // Extensionless (or mislabeled) files whose magic bytes are a renderable
     // image get upgraded to a real image preview.
     if sniff::sniffed_renderable_image(&bytes) {
-        return PreviewContent::Image { path: path.to_path_buf(), dimensions: None };
+        return PreviewContent::Image {
+            path: path.to_path_buf(),
+            dimensions: None,
+        };
     }
     hex_from(&bytes, total)
 }
@@ -377,7 +393,11 @@ fn hex_from(bytes: &[u8], total: u64) -> PreviewContent {
             }
         })
         .collect();
-    PreviewContent::Hex { rows, signature: sniff::sniff(bytes), total_size: total }
+    PreviewContent::Hex {
+        rows,
+        signature: sniff::sniff(bytes),
+        total_size: total,
+    }
 }
 
 #[cfg(test)]
@@ -394,7 +414,11 @@ mod tests {
         let rust = dir.join("sample.rs");
         let _ = std::fs::write(&rust, "fn main() { println!(\"hi\"); }\n");
         match load_preview(PreviewKind::Code, &rust, "rs") {
-            PreviewContent::Code { language, truncated, .. } => {
+            PreviewContent::Code {
+                language,
+                truncated,
+                ..
+            } => {
                 assert_eq!(language, Some("rust"));
                 assert!(!truncated);
             }
@@ -431,7 +455,10 @@ mod tests {
         let _ = std::fs::write(&fake_txt, b"MZ\x90\x00\x03\x00\x00\x00");
         assert!(matches!(
             load_preview(PreviewKind::Code, &fake_txt, "txt"),
-            PreviewContent::Hex { signature: Some("Windows executable (PE)"), .. }
+            PreviewContent::Hex {
+                signature: Some("Windows executable (PE)"),
+                ..
+            }
         ));
 
         // Missing file is an error, not a panic.
@@ -468,7 +495,10 @@ mod tests {
 
     #[test]
     fn halve_envelope_takes_pairwise_max() {
-        assert_eq!(halve_envelope(&[0.1, 0.9, 0.5, 0.2, 0.7]), vec![0.9, 0.5, 0.7]);
+        assert_eq!(
+            halve_envelope(&[0.1, 0.9, 0.5, 0.2, 0.7]),
+            vec![0.9, 0.5, 0.7]
+        );
     }
 
     #[test]
@@ -478,8 +508,11 @@ mod tests {
 
     #[test]
     fn hex_rows_format() {
-        let PreviewContent::Hex { rows, signature, total_size } =
-            hex_from(b"MZ\x90\x00ABCDEFGHIJKL", 14)
+        let PreviewContent::Hex {
+            rows,
+            signature,
+            total_size,
+        } = hex_from(b"MZ\x90\x00ABCDEFGHIJKL", 14)
         else {
             unreachable!("hex_from always returns Hex");
         };

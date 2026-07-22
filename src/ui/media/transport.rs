@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Bounds, Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement as _, Pixels, SharedString, Styled as _, canvas, div, fill, point,
-    px, size,
+    MouseMoveEvent, ParentElement as _, Pixels, SharedString, Styled as _, canvas, div, fill,
+    point, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
@@ -73,12 +73,22 @@ pub fn track_meta_from(
     duration_ms: u64,
 ) -> TrackMeta {
     let find = |label: &str| {
-        rows.iter().find(|(k, _)| k.as_ref() == label).map(|(_, v)| v.clone())
+        rows.iter()
+            .find(|(k, _)| k.as_ref() == label)
+            .map(|(_, v)| v.clone())
     };
     let title = find("Title").unwrap_or_else(|| {
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string().into()
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string()
+            .into()
     });
-    TrackMeta { title, artist: find("Artist"), duration_ms }
+    TrackMeta {
+        title,
+        artist: find("Artist"),
+        duration_ms,
+    }
 }
 
 /// `mm:ss` clock label.
@@ -145,7 +155,11 @@ pub fn transport_buttons<V: 'static>(
     let snap = snapshot(path, cx);
     let (is_current, is_playing) = (snap.is_current, snap.is_playing);
     let play_path = path.to_path_buf();
-    let play_icon = if is_playing { PikuIcon::Pause } else { PikuIcon::Play };
+    let play_icon = if is_playing {
+        PikuIcon::Pause
+    } else {
+        PikuIcon::Play
+    };
     let play_tip = if is_playing {
         "Pause"
     } else if is_current {
@@ -166,7 +180,9 @@ pub fn transport_buttons<V: 'static>(
                 .on_click(cx.listener(move |_, _, _, cx| {
                     let path = play_path.clone();
                     let meta = meta.clone();
-                    update_player(cx, |player, cx| player.play_or_toggle_meta(path, Some(meta), cx));
+                    update_player(cx, |player, cx| {
+                        player.play_or_toggle_meta(path, Some(meta), cx)
+                    });
                 })),
         )
         .child(
@@ -218,7 +234,11 @@ pub fn volume_control<V: 'static>(
     muted: bool,
     cx: &mut Context<V>,
 ) -> impl IntoElement {
-    let icon = if muted || volume <= 0.0 { PikuIcon::VolumeX } else { PikuIcon::Volume2 };
+    let icon = if muted || volume <= 0.0 {
+        PikuIcon::VolumeX
+    } else {
+        PikuIcon::Volume2
+    };
     let shown = if muted { 0.0 } else { volume };
     let fill_color = cx.theme().foreground;
 

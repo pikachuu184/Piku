@@ -65,8 +65,12 @@ pub trait GitBackend: Send + Sync {
     ) -> GitResult<Vec<CommitInfo>>;
 
     /// Full detail (message body + changed files) for one commit.
-    fn commit_detail(&self, root: &Path, id: &str, interrupt: &Arc<AtomicBool>)
-    -> GitResult<CommitDetail>;
+    fn commit_detail(
+        &self,
+        root: &Path,
+        id: &str,
+        interrupt: &Arc<AtomicBool>,
+    ) -> GitResult<CommitDetail>;
 
     /// History of one file (commits that touched it), bounded by
     /// `FILE_HISTORY_WALK_CAP` commits scanned.
@@ -78,8 +82,12 @@ pub trait GitBackend: Send + Sync {
     ) -> GitResult<Vec<CommitInfo>>;
 
     /// Textual diff for one file between two states.
-    fn diff_file(&self, root: &Path, target: &DiffTarget, interrupt: &Arc<AtomicBool>)
-    -> GitResult<DiffPayload>;
+    fn diff_file(
+        &self,
+        root: &Path,
+        target: &DiffTarget,
+        interrupt: &Arc<AtomicBool>,
+    ) -> GitResult<DiffPayload>;
 
     /// Raw bytes of `rel_path` as of `commit`, capped at `cap` bytes.
     /// Returns `(bytes, truncated)`. Not yet surfaced in the UI (historical

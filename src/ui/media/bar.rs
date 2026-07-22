@@ -28,7 +28,9 @@ pub struct MediaBar {
 impl MediaBar {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let audio = PikuState::global(cx).audio.clone();
-        Self { _audio: cx.observe(&audio, |_, _, cx| cx.notify()) }
+        Self {
+            _audio: cx.observe(&audio, |_, _, cx| cx.notify()),
+        }
     }
 }
 
@@ -76,7 +78,11 @@ impl Render for MediaBar {
                     .justify_center()
                     .rounded(cx.theme().radius)
                     .bg(cx.theme().muted)
-                    .child(Icon::new(PikuIcon::Music).size(px(15.)).text_color(cx.theme().muted_foreground)),
+                    .child(
+                        Icon::new(PikuIcon::Music)
+                            .size(px(15.))
+                            .text_color(cx.theme().muted_foreground),
+                    ),
             )
             // Title / artist.
             .child(
@@ -101,13 +107,20 @@ impl Render for MediaBar {
                         )
                     }),
             )
-            .child(transport::transport_buttons("media-bar", &path, meta, dur, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(80.))
-                    .child(transport::scrubber(&[], progress, dur, 10.0, cx)),
-            )
+            .child(transport::transport_buttons(
+                "media-bar",
+                &path,
+                meta,
+                dur,
+                cx,
+            ))
+            .child(div().flex_1().min_w(px(80.)).child(transport::scrubber(
+                &[],
+                progress,
+                dur,
+                10.0,
+                cx,
+            )))
             .child(
                 div()
                     .flex_none()
