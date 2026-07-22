@@ -75,6 +75,43 @@ fn commit_files(
     id
 }
 
+/// Create or move a ref with an inline reflog identity. `Repository::reference`
+/// sources the reflog committer from git config, which CI runners don't have —
+/// this keeps the tests hermetic the same way `commit_files` does.
+fn set_ref(
+    t: &TestRepo,
+    name: &str,
+    target: gix::ObjectId,
+    expected: gix::refs::transaction::PreviousValue,
+) {
+    use gix::refs::transaction::{Change, LogChange, RefEdit, RefLog};
+
+    let sig = gix::actor::Signature {
+        name: "Piku Test".into(),
+        email: "test@example.com".into(),
+        time: gix::date::Time::now_utc(),
+    };
+    let mut buf = Default::default();
+    t.repo
+        .edit_references_as(
+            Some(RefEdit {
+                change: Change::Update {
+                    log: LogChange {
+                        mode: RefLog::AndReference,
+                        force_create_reflog: false,
+                        message: "test".into(),
+                    },
+                    expected,
+                    new: gix::refs::Target::Object(target),
+                },
+                name: name.try_into().unwrap(),
+                deref: false,
+            }),
+            Some(sig.to_ref(&mut buf)),
+        )
+        .unwrap();
+}
+
 fn no_interrupt() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
@@ -155,7 +192,12 @@ fn commits_and_paging_and_sanitization() {
 fn commit_detail_lists_changed_files() {
     let t = init_repo("detail");
     let c1 = commit_files(&t, &[("a.txt", "1\n")], "first", None);
-    let c2 = commit_files(&t, &[("a.txt", "2\n"), ("b.txt", "new\n")], "second", Some(c1));
+    let c2 = commit_files(
+        &t,
+        &[("a.txt", "2\n"), ("b.txt", "new\n")],
+        "second",
+        Some(c1),
+    );
 
     let backend = GixBackend::default();
     let detail = backend
@@ -188,7 +230,12 @@ fn file_history_only_lists_touching_commits() {
 fn diff_commit_vs_parent_produces_hunks() {
     let t = init_repo("diff");
     let c1 = commit_files(&t, &[("a.txt", "line1\nline2\nline3\n")], "first", None);
-    let c2 = commit_files(&t, &[("a.txt", "line1\nchanged\nline3\n")], "second", Some(c1));
+    let c2 = commit_files(
+        &t,
+        &[("a.txt", "line1\nchanged\nline3\n")],
+        "second",
+        Some(c1),
+    );
 
     let backend = GixBackend::default();
     let diff = backend
@@ -233,14 +280,12 @@ fn branches_mark_head() {
     let t = init_repo("branches");
     let c1 = commit_files(&t, &[("a.txt", "1\n")], "init", None);
     // A second branch pointing at the same commit.
-    t.repo
-        .reference(
-            "refs/heads/feature/extra",
-            c1,
-            gix::refs::transaction::PreviousValue::MustNotExist,
-            "test",
-        )
-        .unwrap();
+    set_ref(
+        &t,
+        "refs/heads/feature/extra",
+        c1,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+    );
 
     let backend = GixBackend::default();
     let branches = backend.branches(&t.root).unwrap();
@@ -303,7 +348,11 @@ fn stage_commit_unstage_cycle() {
 
     // Clean after commit.
     let status = backend.status(&t.root, &no_interrupt()).unwrap();
-    assert!(status.by_path.is_empty(), "worktree should be clean, got {:?}", status.by_path);
+    assert!(
+        status.by_path.is_empty(),
+        "worktree should be clean, got {:?}",
+        status.by_path
+    );
 
     // Commit content is correct.
     let (bytes, _) = backend
@@ -321,7 +370,10 @@ fn stage_commit_unstage_cycle() {
         status.by_path.get(&abs).copied().unwrap_or_default()
     };
     assert!(a.index.is_none(), "a.txt should be unstaged");
-    assert!(a.worktree.is_some(), "a.txt should still be modified in worktree");
+    assert!(
+        a.worktree.is_some(),
+        "a.txt should still be modified in worktree"
+    );
 }
 
 #[test]
@@ -339,7 +391,13 @@ fn branch_create_delete_and_guards() {
     let backend = GixBackend::default();
 
     backend.create_branch(&t.root, "feature/x").unwrap();
-    assert!(backend.branches(&t.root).unwrap().iter().any(|b| b.name == "feature/x"));
+    assert!(
+        backend
+            .branches(&t.root)
+            .unwrap()
+            .iter()
+            .any(|b| b.name == "feature/x")
+    );
 
     // Duplicate creation fails; hostile names rejected before gix runs.
     assert!(backend.create_branch(&t.root, "feature/x").is_err());
@@ -355,7 +413,13 @@ fn branch_create_delete_and_guards() {
         .unwrap();
     assert!(backend.delete_branch(&t.root, &head.name).is_err());
     backend.delete_branch(&t.root, "feature/x").unwrap();
-    assert!(!backend.branches(&t.root).unwrap().iter().any(|b| b.name == "feature/x"));
+    assert!(
+        !backend
+            .branches(&t.root)
+            .unwrap()
+            .iter()
+            .any(|b| b.name == "feature/x")
+    );
 }
 
 #[test]
@@ -380,14 +444,12 @@ fn checkout_switches_branches_and_refuses_dirty() {
         .into_iter()
         .find(|b| b.is_head)
         .unwrap();
-    t.repo
-        .reference(
-            format!("refs/heads/{}", head.name).as_str(),
-            c1,
-            gix::refs::transaction::PreviousValue::Any,
-            "test rewind",
-        )
-        .unwrap();
+    set_ref(
+        &t,
+        format!("refs/heads/{}", head.name).as_str(),
+        c1,
+        gix::refs::transaction::PreviousValue::Any,
+    );
     // Reset worktree + index to c1 state manually (branch rewind above
     // moved the ref only).
     std::fs::write(t.root.join("a.txt"), "base\n").unwrap();
@@ -406,8 +468,14 @@ fn checkout_switches_branches_and_refuses_dirty() {
 
     // Clean checkout lands the branch's files.
     backend.checkout(&t.root, "other", &no_interrupt()).unwrap();
-    assert_eq!(std::fs::read_to_string(t.root.join("a.txt")).unwrap(), "branched\n");
-    assert_eq!(std::fs::read_to_string(t.root.join("extra.txt")).unwrap(), "only here\n");
+    assert_eq!(
+        std::fs::read_to_string(t.root.join("a.txt")).unwrap(),
+        "branched\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(t.root.join("extra.txt")).unwrap(),
+        "only here\n"
+    );
     let head_now = backend
         .branches(&t.root)
         .unwrap()
@@ -417,8 +485,13 @@ fn checkout_switches_branches_and_refuses_dirty() {
     assert_eq!(head_now.name, "other");
 
     // Switching back removes the branch-only file.
-    backend.checkout(&t.root, &head.name, &no_interrupt()).unwrap();
-    assert_eq!(std::fs::read_to_string(t.root.join("a.txt")).unwrap(), "base\n");
+    backend
+        .checkout(&t.root, &head.name, &no_interrupt())
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(t.root.join("a.txt")).unwrap(),
+        "base\n"
+    );
     assert!(!t.root.join("extra.txt").exists());
 }
 
@@ -447,7 +520,11 @@ fn fetch_rejects_non_https_remotes() {
     );
 
     // Unknown remotes are refused too.
-    assert!(backend.fetch(&t.root, "nonexistent", &tx, &no_interrupt()).is_err());
+    assert!(
+        backend
+            .fetch(&t.root, "nonexistent", &tx, &no_interrupt())
+            .is_err()
+    );
 }
 
 #[test]
@@ -478,14 +555,12 @@ fn checkout_and_delete_work_through_full_ref_names() {
     let c1 = commit_files(&t, &[("a.txt", "1\n")], "init", None);
     // A branch with a non-ASCII name, created directly at the ref level —
     // the UI's create path would reject it, but external tools make these.
-    t.repo
-        .reference(
-            "refs/heads/feature/naïve",
-            c1,
-            gix::refs::transaction::PreviousValue::MustNotExist,
-            "test",
-        )
-        .unwrap();
+    set_ref(
+        &t,
+        "refs/heads/feature/naïve",
+        c1,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+    );
 
     let backend = GixBackend::default();
     let branches = backend.branches(&t.root).unwrap();
@@ -508,8 +583,16 @@ fn checkout_and_delete_work_through_full_ref_names() {
     assert_eq!(head.ref_name, "refs/heads/feature/naïve");
 
     // Traversal-shaped "ref names" are rejected outright.
-    assert!(backend.checkout(&t.root, "refs/heads/../escape", &no_interrupt()).is_err());
-    assert!(backend.delete_branch(&t.root, "refs/heads/x\u{7}y").is_err());
+    assert!(
+        backend
+            .checkout(&t.root, "refs/heads/../escape", &no_interrupt())
+            .is_err()
+    );
+    assert!(
+        backend
+            .delete_branch(&t.root, "refs/heads/x\u{7}y")
+            .is_err()
+    );
 }
 
 #[test]

@@ -169,7 +169,8 @@ impl GixBackend {
     ) -> GitResult<CommitInfo> {
         let commit = repo.find_commit(id).map_err(GitError::msg)?;
         let message = commit.message().map_err(GitError::msg)?;
-        let summary = sanitize_git_text(&message.summary().to_str_lossy(), MAX_SUMMARY_CHARS, false);
+        let summary =
+            sanitize_git_text(&message.summary().to_str_lossy(), MAX_SUMMARY_CHARS, false);
         let author = commit
             .author()
             .map(|a| sanitize_git_text(&a.name.to_str_lossy(), MAX_AUTHOR_CHARS, false))
@@ -326,9 +327,7 @@ impl GitBackend for GixBackend {
                 break 'sync;
             };
             let mut upstream = upstream;
-            let (Ok(local_id), Ok(upstream_id)) =
-                (repo.head_id(), upstream.peel_to_id())
-            else {
+            let (Ok(local_id), Ok(upstream_id)) = (repo.head_id(), upstream.peel_to_id()) else {
                 break 'sync;
             };
             let count = |tip: gix::ObjectId, hide: gix::ObjectId| -> GitResult<usize> {
@@ -407,7 +406,9 @@ impl GitBackend for GixBackend {
             match &item {
                 gix::status::Item::IndexWorktree(iw) => {
                     use gix::status::index_worktree::iter::Summary;
-                    let Some(summary) = iw.summary() else { continue };
+                    let Some(summary) = iw.summary() else {
+                        continue;
+                    };
                     let code = match summary {
                         Summary::Removed => GitStatusCode::Deleted,
                         Summary::Added => GitStatusCode::Untracked,
@@ -509,7 +510,10 @@ impl GitBackend for GixBackend {
         let body = commit
             .message()
             .ok()
-            .and_then(|m| m.body.map(|b| sanitize_git_text(&b.to_str_lossy(), MAX_BODY_CHARS, true)))
+            .and_then(|m| {
+                m.body
+                    .map(|b| sanitize_git_text(&b.to_str_lossy(), MAX_BODY_CHARS, true))
+            })
             .unwrap_or_default();
 
         let tree = commit.tree().map_err(GitError::msg)?;
@@ -628,7 +632,13 @@ impl GitBackend for GixBackend {
                     .transpose()?
                     .unwrap_or((Vec::new(), false));
                 let new = self.worktree_bytes(&sanitized_root, rel_path, cap)?;
-                ("index".to_string(), "working tree".to_string(), old.0, new.0, old.1 || new.1)
+                (
+                    "index".to_string(),
+                    "working tree".to_string(),
+                    old.0,
+                    new.0,
+                    old.1 || new.1,
+                )
             }
             DiffTarget::IndexVsHead { rel_path } => {
                 let rela = rel_to_slash(rel_path)?;
@@ -644,7 +654,13 @@ impl GitBackend for GixBackend {
                     .map(|entry| self.blob_bytes(&repo, entry.id, cap))
                     .transpose()?
                     .unwrap_or((Vec::new(), false));
-                ("HEAD".to_string(), "index".to_string(), old.0, new.0, old.1 || new.1)
+                (
+                    "HEAD".to_string(),
+                    "index".to_string(),
+                    old.0,
+                    new.0,
+                    old.1 || new.1,
+                )
             }
             DiffTarget::CommitVsParent { commit, rel_path } => {
                 let rela = rel_to_slash(rel_path)?;
@@ -738,7 +754,9 @@ impl GitBackend for GixBackend {
                     // Ops-only lossy form; exotic (non-UTF8) ref bytes are
                     // beyond scope and simply won't round-trip.
                     ref_name: full.as_bstr().to_str_lossy().into_owned(),
-                    is_head: head_name.as_ref() == Some(&full),
+                    // Byte-form comparison, same as `delete_branch` — keeps the
+                    // HEAD check independent of `FullName`'s structural equality.
+                    is_head: head_name.as_ref().map(|h| h.as_bstr()) == Some(full.as_bstr()),
                     is_remote: false,
                     upstream,
                 });
@@ -747,10 +765,7 @@ impl GitBackend for GixBackend {
         if let Ok(iter) = platform.remote_branches() {
             for reference in iter.flatten() {
                 // Skip symbolic refs like `origin/HEAD`.
-                if matches!(
-                    reference.target(),
-                    gix::refs::TargetRef::Symbolic(_)
-                ) {
+                if matches!(reference.target(), gix::refs::TargetRef::Symbolic(_)) {
                     continue;
                 }
                 out.push(BranchInfo {
@@ -792,10 +807,7 @@ impl GitBackend for GixBackend {
         // tree must be removed from the worktree (the tree diff also covers
         // renames via their Deletion/Addition halves since rewrites are off
         // here — pass explicit options with rewrites disabled).
-        let head_tree = repo
-            .head_commit()
-            .ok()
-            .and_then(|c| c.tree().ok());
+        let head_tree = repo.head_commit().ok().and_then(|c| c.tree().ok());
         if let Some(head_tree) = &head_tree {
             let target_tree_obj = repo.find_tree(target_tree).map_err(GitError::msg)?;
             let changes = repo
@@ -810,12 +822,16 @@ impl GitBackend for GixBackend {
                 use gix::diff::tree_with_rewrites::Change;
                 let gone = match &change {
                     Change::Deletion { location, .. } => Some(location),
-                    Change::Rewrite { source_location, .. } => Some(source_location),
+                    Change::Rewrite {
+                        source_location, ..
+                    } => Some(source_location),
                     _ => None,
                 };
                 if let Some(location) = gone
                     && let Some(abs) = self.abs_path(&sanitized_root, location.as_bstr())
-                    && std::fs::symlink_metadata(&abs).map(|m| m.is_file()).unwrap_or(false)
+                    && std::fs::symlink_metadata(&abs)
+                        .map(|m| m.is_file())
+                        .unwrap_or(false)
                 {
                     std::fs::remove_file(&abs).map_err(GitError::msg)?;
                 }
@@ -847,10 +863,7 @@ impl GitBackend for GixBackend {
         // Point HEAD at the branch (with a reflog entry). The reflog line
         // needs an identity even in isolated mode, so one is always supplied.
         use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
-        let symbolic: gix::refs::FullName = full_name
-            .as_str()
-            .try_into()
-            .map_err(GitError::msg)?;
+        let symbolic: gix::refs::FullName = full_name.as_str().try_into().map_err(GitError::msg)?;
         let sig = self.reflog_identity(&repo, root);
         let mut time_buf = Default::default();
         repo.edit_references_as(
@@ -916,7 +929,9 @@ impl GitBackend for GixBackend {
         if let Ok(Some(head_name)) = repo.head_name()
             && head_name.as_bstr() == full.as_str()
         {
-            return Err(GitError::Message("cannot delete the checked-out branch".into()));
+            return Err(GitError::Message(
+                "cannot delete the checked-out branch".into(),
+            ));
         }
         let reference = repo
             .find_reference(full.as_str())
