@@ -26,6 +26,10 @@ fn init_repo(tag: &str) -> TestRepo {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let repo = gix::init(&root).unwrap();
+    let config_path = root.join(".git").join("config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\n[user]\n\tname = Piku Test\n\temail = test@example.com\n");
+    std::fs::write(config_path, config).unwrap();
     TestRepo { root, repo }
 }
 
