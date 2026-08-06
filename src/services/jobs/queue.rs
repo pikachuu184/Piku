@@ -542,8 +542,30 @@ fn remove_recursive(
         .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.is_dir() && !metadata.is_symlink() {
+        // Containment check before descending. The lexical guard above cannot
+        // see through a link: an attacker who swaps a child directory for a
+        // symlink between our `symlink_metadata` and the `read_dir` would have
+        // us recurse outside the subtree being removed. Comparing the child's
+        // *resolved* path against the resolved root closes that in practice.
+        //
+        // Note this is mitigation, not proof: the resolve and the descent are
+        // still two separate steps. Fully closing it needs `openat`-style
+        // handles (`cap-std`), which is tracked separately.
+        let root = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         for child in std::fs::read_dir(path)?.flatten() {
-            remove_recursive(provider, guard, &child.path())?;
+            let child_path = child.path();
+            let child_meta = std::fs::symlink_metadata(&child_path)?;
+            if child_meta.is_dir() && !child_meta.file_type().is_symlink() {
+                let resolved =
+                    dunce::canonicalize(&child_path).unwrap_or_else(|_| child_path.clone());
+                if !resolved.starts_with(&root) {
+                    anyhow::bail!(
+                        "refusing to descend outside the deleted tree: {}",
+                        child_path.display()
+                    );
+                }
+            }
+            remove_recursive(provider, guard, &child_path)?;
         }
     }
     provider.remove_after_move(path)

@@ -42,12 +42,22 @@ pub struct NavPanel {
     places: Vec<Place>,
     drives: Vec<DriveInfo>,
     drives_loaded: bool,
+    /// Places used to be enumerated synchronously in `new`, so the section was
+    /// populated on frame one. Now that it is dispatched, this drives a
+    /// skeleton that reserves the same height — without it the section body
+    /// has zero height for the first frames and everything below it jumps.
+    places_loaded: bool,
     pub(super) ws_edit: Option<WsEdit>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl NavPanel {
     pub const PANEL_NAME: &'static str = "PikuNav";
+
+    /// Placeholder rows shown while `known_places` is in flight. Matches the
+    /// usual number of existing well-known directories closely enough that the
+    /// section does not visibly resize when the real rows arrive.
+    const PLACES_SKELETON_ROWS: usize = 5;
 
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (nav, workspaces, drive_stats) = {
@@ -70,8 +80,13 @@ impl NavPanel {
         cx.backend_task(
             |backend| backend.drive().drives(),
             |this: &mut NavPanel, drives, cx| {
-                this.drives = drives;
+                // Mark loaded either way: a failure must retire the skeleton,
+                // or the sidebar shows placeholder rows forever.
                 this.drives_loaded = true;
+                let Ok(Ok(drives)) = drives else {
+                    return;
+                };
+                this.drives = drives;
                 // Drives are known — refresh any stale per-category usage
                 // stats in the background (silent, cached, sequential).
                 let mounts: Vec<PathBuf> = this.drives.iter().map(|d| d.mount.clone()).collect();
@@ -99,6 +114,10 @@ impl NavPanel {
         cx.backend_task(
             |backend| backend.drive().places(),
             |this: &mut NavPanel, places, cx| {
+                this.places_loaded = true;
+                let Ok(Ok(places)) = places else {
+                    return;
+                };
                 let git = PikuState::global(cx).git.clone();
                 git.update(cx, |git, cx| {
                     for place in &places {
@@ -112,6 +131,7 @@ impl NavPanel {
         Self {
             focus_handle: cx.focus_handle(),
             places: Vec::new(),
+            places_loaded: false,
             drives: Vec::new(),
             drives_loaded: false,
             ws_edit: None,
@@ -354,6 +374,7 @@ impl NavPanel {
 
 impl Render for NavPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _pass = crate::app::diagnostics::enter_render("NavPanel");
         let state = PikuState::global(cx);
         let nav = state.nav.read(cx);
         let favorites: Vec<PathBuf> = nav.favorites.clone();
@@ -373,21 +394,35 @@ impl Render for NavPanel {
             }
         };
 
-        let places_content = v_flex().gap_0p5().children(
-            self.places
-                .iter()
-                .enumerate()
-                .map(|(ix, place)| {
-                    self.nav_row(
-                        SharedString::from(format!("place-{ix}")),
-                        place_icon(place),
-                        SharedString::from(place.name),
-                        place.path.clone(),
-                        cx,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
+        let places_content = if !self.places_loaded {
+            // Same row height and count as a populated Places list, so the
+            // section does not change height when the results land.
+            v_flex()
+                .gap_1()
+                .child(div().mx_1().px_2().py_1p5().child(skeleton_rows(
+                    Self::PLACES_SKELETON_ROWS,
+                    24.,
+                    cx,
+                )))
+        } else if self.places.is_empty() {
+            v_flex().child(empty_hint("No known locations", cx))
+        } else {
+            v_flex().gap_0p5().children(
+                self.places
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, place)| {
+                        self.nav_row(
+                            SharedString::from(format!("place-{ix}")),
+                            place_icon(place),
+                            SharedString::from(place.name),
+                            place.path.clone(),
+                            cx,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
 
         let favorites_content = if favorites.is_empty() {
             v_flex().child(empty_hint("No favorites yet", cx))

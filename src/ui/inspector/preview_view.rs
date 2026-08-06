@@ -877,8 +877,16 @@ fn video_block(
                     .icon(PikuIcon::ExternalLink)
                     .label("Play in default app")
                     .tooltip("Open in your system's video player")
-                    .on_click(cx.listener(move |_, _, _, _| {
-                        let _ = open::that_detached(&path_buf);
+                    // Through `shell_open`, not `open::that_detached`
+                    // directly: it re-authorizes the *resolved* target, so a
+                    // link inside an allowed root cannot hand the OS handler
+                    // something outside it.
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        let name = path_buf
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        crate::ui::explorer::shell_open(&name, &path_buf, window, cx);
                     })),
             ),
         )

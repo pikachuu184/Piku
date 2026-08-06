@@ -36,6 +36,7 @@ impl MediaBar {
 
 impl Render for MediaBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _pass = crate::app::diagnostics::enter_render("MediaBar");
         // Pull an owned snapshot, releasing the player borrow before the
         // transport helpers borrow `cx` mutably.
         let (path, meta, pos_ms, dur, volume, muted) = {

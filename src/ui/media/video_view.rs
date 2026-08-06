@@ -448,6 +448,7 @@ fn trim_speed(speed: f32) -> String {
 
 impl Render for VideoView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _pass = crate::app::diagnostics::enter_render("VideoView");
         div()
             .id("piku-video-view")
             .track_focus(&self.focus_handle)

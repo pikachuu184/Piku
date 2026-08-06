@@ -32,10 +32,14 @@ pub fn run() {
 
         // Drain outstanding backend work before the process goes away, so an
         // in-flight copy is cancelled rather than torn down mid-write.
+        //
+        // gpui polls every quit future on the foreground executor under a
+        // 200 ms timeout, so this must `.await` (not block) and must finish
+        // well inside that budget — see `SHUTDOWN_GRACE`.
         cx.on_app_quit(|cx| {
             let backend = PikuState::global(cx).backend().clone();
             async move {
-                backend.shutdown();
+                backend.shutdown().await;
             }
         })
         .detach();

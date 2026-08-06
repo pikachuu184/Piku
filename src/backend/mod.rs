@@ -20,6 +20,7 @@
 
 pub mod dispatch;
 pub mod error;
+pub mod path;
 pub mod protocol;
 pub mod runtime;
 pub mod services;
@@ -67,8 +68,12 @@ impl Backend {
 
     /// Cancel outstanding work and wait briefly for it to stop. Called once,
     /// on application quit.
-    pub fn shutdown(&self) -> bool {
-        self.0.rt.shutdown()
+    ///
+    /// `async` rather than blocking: gpui polls quit futures on the foreground
+    /// executor and enforces its own 200 ms timeout there, so blocking would
+    /// freeze the window and defeat that timeout.
+    pub async fn shutdown(&self) -> bool {
+        self.0.rt.shutdown().await
     }
 }
 

@@ -23,6 +23,7 @@
 use gpui::{Context, Window};
 
 use crate::backend::Backend;
+use crate::backend::error::BackendError;
 use crate::backend::protocol::{BackendStream, BackendTask, Inflight, StreamItem};
 use crate::state::PikuState;
 
@@ -41,11 +42,16 @@ pub enum Flow {
 pub trait BackendExt<V: 'static> {
     /// Issue a one-shot command and apply its result on the UI thread.
     ///
+    /// `apply` receives a `Result`, and is called **exactly once** as long as
+    /// the view is still alive — including when the backend goes away without
+    /// replying. Swallowing that case is how a view ends up showing skeleton
+    /// rows forever, so it is not swallowed here.
+    ///
     /// `cx.notify()` is called for you after `apply` returns.
     fn backend_task<T: Send + 'static>(
         &mut self,
         make: impl FnOnce(&Backend) -> BackendTask<T>,
-        apply: impl FnOnce(&mut V, T, &mut Context<V>) + 'static,
+        apply: impl FnOnce(&mut V, Result<T, BackendError>, &mut Context<V>) + 'static,
     );
 
     /// As [`backend_task`](Self::backend_task), but `apply` also receives the
@@ -80,19 +86,19 @@ impl<V: 'static> BackendExt<V> for Context<'_, V> {
     fn backend_task<T: Send + 'static>(
         &mut self,
         make: impl FnOnce(&Backend) -> BackendTask<T>,
-        apply: impl FnOnce(&mut V, T, &mut Context<V>) + 'static,
+        apply: impl FnOnce(&mut V, Result<T, BackendError>, &mut Context<V>) + 'static,
     ) {
         let task = make(PikuState::global(self).backend());
         let id = task.id();
         tracing::debug!(target: "piku::dispatch", req = %id, "dispatched");
 
         self.spawn(async move |this, cx| {
-            let Ok(value) = task.join().await else {
-                tracing::debug!(target: "piku::dispatch", req = %id, "no result");
-                return;
-            };
+            let result = task.join().await;
+            if let Err(error) = &result {
+                tracing::debug!(target: "piku::dispatch", req = %id, %error, "failed");
+            }
             let _ = this.update(cx, |view, cx| {
-                apply(view, value, cx);
+                apply(view, result, cx);
                 cx.notify();
             });
         })
@@ -133,6 +139,15 @@ impl<V: 'static> BackendExt<V> for Context<'_, V> {
         tracing::debug!(target: "piku::dispatch", req = %id, "dispatched (stream)");
 
         self.spawn(async move |this, cx| {
+            // The consumer is promised exactly one terminal item. A producer
+            // that dies without calling `finish` (a panic, a dropped sink, a
+            // runtime drain) closes the channel silently, and without the
+            // synthesized `Done` below the view would sit in its loading state
+            // forever. `Flow::Stop` is the one case that needs no terminal:
+            // the consumer asked to stop and has already moved on.
+            let mut delivered_done = false;
+            let mut view_alive = true;
+
             while let Some(item) = stream.next().await {
                 let done = item.is_done();
                 let stop = this
@@ -142,14 +157,32 @@ impl<V: 'static> BackendExt<V> for Context<'_, V> {
                         flow == Flow::Stop
                     })
                     // The view is gone; nothing left to deliver to.
-                    .unwrap_or(true);
-                if stop {
-                    tracing::debug!(target: "piku::dispatch", req = %id, superseded = true, "stopped");
-                    break;
-                }
+                    .unwrap_or_else(|_| {
+                        view_alive = false;
+                        true
+                    });
                 if done {
+                    delivered_done = true;
                     break;
                 }
+                if stop {
+                    tracing::debug!(
+                        target: "piku::dispatch", req = %id, superseded = true, "stopped"
+                    );
+                    // Superseded by the consumer's own choice — no terminal owed.
+                    delivered_done = true;
+                    break;
+                }
+            }
+
+            if !delivered_done && view_alive {
+                tracing::debug!(
+                    target: "piku::dispatch", req = %id, "producer ended without a terminal item"
+                );
+                let _ = this.update(cx, |view, cx| {
+                    apply(view, StreamItem::Done(Err(BackendError::ShuttingDown)), cx);
+                    cx.notify();
+                });
             }
         })
         .detach();

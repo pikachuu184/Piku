@@ -113,6 +113,12 @@ pub enum MetadataError {
 pub enum DriveError {
     #[error("enumerating drives: {0}")]
     Io(#[from] io::Error),
+    /// A refresh was already running and there was no previous result to
+    /// serve. Distinct from "no drives" — the caller may simply retry.
+    #[error("drive enumeration is already in progress")]
+    Busy,
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// Everything a backend operation can fail with.
@@ -139,7 +145,8 @@ impl BackendError {
         match self {
             Self::Directory(DirectoryError::Cancelled)
             | Self::File(FileError::Cancelled)
-            | Self::Metadata(MetadataError::Cancelled) => true,
+            | Self::Metadata(MetadataError::Cancelled)
+            | Self::Drive(DriveError::Cancelled) => true,
             // A shutdown drain is not a user-visible failure either; treating
             // it as cancellation keeps quit from raising an error toast.
             Self::ShuttingDown => true,

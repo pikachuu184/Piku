@@ -123,6 +123,7 @@ impl BranchPopover {
 
 impl Render for BranchPopover {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _pass = crate::app::diagnostics::enter_render("BranchPopover");
         let locals: Vec<BranchInfo> = self
             .branches
             .iter()

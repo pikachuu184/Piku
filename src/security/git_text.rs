@@ -1,55 +1,20 @@
-//! Sanitizer for repository-derived text. Branch names, commit messages,
-//! authors, remote names/URLs, tags and paths inside a repository are all
-//! attacker-controlled: a hostile repo can embed ANSI escapes, C0/C1 control
-//! characters, or Unicode bidi overrides to spoof or scramble the UI. Every
-//! such string passes through here before it reaches a renderable type.
-
-/// Explicit bidi/invisible formatting characters that can reorder or hide
-/// rendered text (Trojan Source class attacks).
-fn is_bidi_or_invisible(c: char) -> bool {
-    matches!(
-        c,
-        '\u{202A}'..='\u{202E}'   // LRE, RLE, PDF, LRO, RLO
-        | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
-        | '\u{061C}'              // Arabic letter mark
-        | '\u{200E}' | '\u{200F}' // LRM, RLM
-        | '\u{FEFF}'              // zero-width no-break space / BOM
-    )
-}
+//! Git-specific text handling: branch-name validation, plus a compatibility
+//! alias for the shared display sanitizer.
+//!
+//! Repository-derived text (branch names, commit messages, authors, remote
+//! URLs, paths inside a repo) is attacker-controlled, and every such string
+//! passes through [`sanitize_git_text`] before reaching a renderable type.
+//! The sanitizer itself now lives in [`crate::security::text`] because the
+//! same problem applies to filenames, archive entries, and audio tags.
 
 /// Strip control characters, ANSI escape sequences, and bidi overrides, then
 /// cap the result at `max_chars` characters (appending `…` when truncated).
 ///
-/// - C0 controls (including ESC, so ANSI sequences lose their trigger byte),
-///   C1 controls, and DEL are removed. `\r` is always removed.
-/// - `\n` and `\t` are kept only when `keep_newlines` is true (commit message
-///   bodies); single-line fields collapse them to a space.
-/// - The cap counts `char`s, not bytes, so multi-byte text truncates cleanly.
+/// Thin alias for [`crate::security::text::sanitize_display`]. The git layer
+/// keeps calling it under this name so that widening the sanitizer did not
+/// require touching `services/git/*`, which is otherwise stable.
 pub fn sanitize_git_text(raw: &str, max_chars: usize, keep_newlines: bool) -> String {
-    let mut out = String::with_capacity(raw.len().min(max_chars * 4));
-    let mut count = 0usize;
-    let mut truncated = false;
-
-    for c in raw.chars() {
-        let mapped = match c {
-            '\r' => continue,
-            '\n' | '\t' if keep_newlines => c,
-            '\n' | '\t' => ' ',
-            c if c.is_control() => continue, // C0 (incl. ESC), C1, DEL
-            c if is_bidi_or_invisible(c) => continue,
-            c => c,
-        };
-        if count >= max_chars {
-            truncated = true;
-            break;
-        }
-        out.push(mapped);
-        count += 1;
-    }
-    if truncated {
-        out.push('…');
-    }
-    out
+    crate::security::text::sanitize_display(raw, max_chars, keep_newlines)
 }
 
 /// Validate a branch name the *user* typed before it is handed to the git

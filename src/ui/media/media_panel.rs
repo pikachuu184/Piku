@@ -181,8 +181,15 @@ impl MediaPanel {
                             .icon(PikuIcon::ExternalLink)
                             .label("Play in default app")
                             .tooltip("Open in your system's video player")
-                            .on_click(cx.listener(move |_, _, _, _| {
-                                let _ = open::that_detached(&open_path);
+                            // See the note in `preview_view`: the OS handoff
+                            // must go through the canonicalize-then-reauthorize
+                            // path, not straight to `open::that_detached`.
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                let name = open_path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                crate::ui::explorer::shell_open(&name, &open_path, window, cx);
                             })),
                     )
                     .child(rows_block(rows, cx))
@@ -260,6 +267,7 @@ fn message(cx: &Context<MediaPanel>, text: &str) -> AnyElement {
 
 impl Render for MediaPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _pass = crate::app::diagnostics::enter_render("MediaPanel");
         div()
             .id("piku-media-panel")
             .track_focus(&self.focus_handle)

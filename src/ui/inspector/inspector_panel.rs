@@ -485,6 +485,7 @@ impl InspectorPanel {
 
 impl Render for InspectorPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _pass = crate::app::diagnostics::enter_render("InspectorPanel");
         let entries = PikuState::global(cx).selection.read(cx).entries.clone();
         let in_repo = self.repo_root(cx).is_some();
         // Leaving every repository resets the toggle; re-entering one starts

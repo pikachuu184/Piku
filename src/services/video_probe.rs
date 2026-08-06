@@ -30,6 +30,13 @@ fn ffmpeg_available() -> bool {
 const POSTER_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const POSTER_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Cap on a sanitized filename stem used to build a saved-frame path.
+const SAFE_STEM_CAP: usize = 64;
+
+/// How many saved frames to keep in the screenshot cache. Nothing else ever
+/// deletes from it, so without a bound it grows for the life of the install.
+const SCREENSHOT_KEEP: usize = 100;
+
 /// Extract a poster frame ~1s into the video with the bundled ffmpeg, decode
 /// it, and optionally downscale to a `target`-edge thumbnail. Returns `None`
 /// when ffmpeg is unavailable or extraction fails. Blocking — background
@@ -111,14 +118,82 @@ pub fn save_frame_png(path: &Path, at_ms: u64) -> Option<PathBuf> {
     }
     let dir = dirs::cache_dir()?.join("piku").join("screenshots");
     std::fs::create_dir_all(&dir).ok()?;
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
+    // The stem comes from a user file and lands in a filename we create.
+    // Restrict it to a conservative set rather than trusting it: a name with
+    // a separator, a reserved device name, or a bidi override has no business
+    // shaping a path we write to.
+    let stem = safe_stem(path);
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_millis();
     let dest = dir.join(format!("{stem}-{ts}.png"));
-    std::fs::write(&dest, &png).ok()?;
+    // `create_new`: never truncate, and never follow a symlink someone
+    // pre-planted at the destination. Owner-only, since a frame from a private
+    // video is private.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&dest).ok()?;
+    std::io::Write::write_all(&mut file, &png).ok()?;
+    prune_screenshots(&dir);
     Some(dest)
+}
+
+/// A filename stem safe to build a path from: ASCII alphanumerics, `.`, `-`,
+/// and `_`, capped, never empty, never a reserved device name.
+fn safe_stem(path: &Path) -> String {
+    let raw = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(SAFE_STEM_CAP)
+        .collect();
+    let trimmed = cleaned.trim_matches(['.', '_', '-']).to_string();
+    if trimmed.is_empty() || crate::security::path_guard::is_reserved_name(&trimmed) {
+        "frame".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// Keep the screenshot cache bounded. Nothing else ever deletes from it, so
+/// without this it grows for the life of the installation.
+fn prune_screenshots(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            Some((meta.modified().ok()?, e.path()))
+        })
+        .collect();
+    if files.len() <= SCREENSHOT_KEEP {
+        return;
+    }
+    // Oldest first, drop the excess.
+    files.sort_by_key(|(mtime, _)| *mtime);
+    for (_, path) in files.iter().take(files.len() - SCREENSHOT_KEEP) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Peak waveform (0..1, normalized, `buckets` bars) decoded via the bundled

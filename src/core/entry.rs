@@ -30,10 +30,19 @@ impl FsEntry {
     }
 
     pub fn from_metadata(path: PathBuf, metadata: &std::fs::Metadata) -> Self {
-        let name = path
+        // Sanitized once, here, rather than at each of the dozen places a
+        // name is rendered (list rows, grid tiles, breadcrumbs, tab titles,
+        // the inspector, and — most importantly — the "this is a program, run
+        // it?" dialog). A filename is attacker-controlled: without this, a
+        // `U+202E` in one reverses everything after it, so `invoice<RLO>gpj.exe`
+        // displays as `invoice.exe.jpg`.
+        //
+        // `path` keeps the real bytes; only the display name is cleaned.
+        let raw = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let name = crate::security::text::sanitize_label(&raw);
 
         let kind = if metadata.is_symlink() {
             EntryKind::Symlink

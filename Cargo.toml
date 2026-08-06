@@ -45,6 +45,12 @@ rayon = "1"
 # Lighter than std for the short critical sections around the caches.
 parking_lot = "0.12"
 
+# Windows path normalization. `canonicalize` returns `\\?\` verbatim paths;
+# this returns the plain-disk spelling when that is unambiguously safe. On
+# non-Windows every entry point is a compile-time no-op. Already in the tree
+# transitively via gix.
+dunce = "1"
+
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

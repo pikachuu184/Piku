@@ -54,7 +54,9 @@ check_no_gpui_in_services() {
 check_spawn_blocking_confined() {
     local name="spawn_blocking is confined to backend/runtime.rs"
     local hits
-    hits=$(grep -rn 'spawn_blocking' src/ --include='*.rs' \
+    # Match the call form only. A bare word search also hits doc comments that
+    # legitimately *explain* the rule, which would make the gate unfixable.
+    hits=$(grep -rn '\.spawn_blocking(' src/ --include='*.rs' \
         | grep -v '^src/backend/runtime.rs:' || true)
     if [ -n "$hits" ]; then
         fail "$name" \

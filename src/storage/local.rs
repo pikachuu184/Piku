@@ -179,6 +179,28 @@ impl StorageProvider for LocalProvider {
         let from = self.guard.sanitize(from)?;
         let to = self.guard.sanitize(to)?;
 
+        // Refuse a symlinked source, matching `open_read`. Copying *through* a
+        // link silently duplicates whatever it points at, which may be
+        // somewhere the user never selected.
+        let src_meta = fs::symlink_metadata(&from)
+            .with_context(|| format!("reading metadata of {}", from.display()))?;
+        if src_meta.file_type().is_symlink() {
+            bail!("refusing to copy through a link: {}", from.display());
+        }
+
+        // Refuse a destination that already exists as a symlink. `File::create`
+        // truncates and *follows* it, so a link pre-planted at the destination
+        // would redirect the write anywhere the user can write — unlike
+        // `create_file`, which uses `create_new`. The transfer engine picks a
+        // non-colliding name before calling this, so an existing destination
+        // is already the unusual case.
+        match fs::symlink_metadata(&to) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                bail!("refusing to overwrite a link: {}", to.display());
+            }
+            Ok(_) | Err(_) => {}
+        }
+
         let mut src =
             fs::File::open(&from).with_context(|| format!("opening {}", from.display()))?;
         let mut dst =

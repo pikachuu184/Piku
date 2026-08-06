@@ -38,6 +38,7 @@ impl PikuTitleBar {
 
 impl Render for PikuTitleBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _pass = crate::app::diagnostics::enter_render("TitleBar");
         let (left_open, right_open) = self
             .dock_area
             .upgrade()

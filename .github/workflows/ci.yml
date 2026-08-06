@@ -26,6 +26,26 @@ jobs:
       - name: Architectural invariants
         run: bash ci/invariants.sh
 
+  # Launches the real binary against seeded fixtures and asserts on its
+  # structured tracing: no blocking work inside a render pass, UI-thread
+  # blocking within a ratcheting budget, one watcher per directory, a clean
+  # quit inside gpui's timeout, and render p99 within budget. Needs a display,
+  # so it runs under a virtual X server.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Runtime dependencies and a virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libxcb1-dev \
+            xvfb mesa-vulkan-drivers
+      - name: End-to-end validation
+        run: xvfb-run -a bash ci/e2e.sh
+
   # The code is Windows-first (drive-letter roots, the reserved-device-name
   # table, CREATE_NO_WINDOW). Building and testing on all three catches the
   # platform assumptions that a Windows-only matrix silently accepted — the

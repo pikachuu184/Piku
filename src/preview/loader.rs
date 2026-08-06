@@ -151,8 +151,22 @@ fn load_archive(path: &Path) -> PreviewContent {
         let Ok(entry) = archive.by_index_raw(index) else {
             continue;
         };
+        // `enclosed_name()` is the zip crate's own path-safety accessor: it
+        // returns `None` for names that would escape the extraction root
+        // (`../`, absolute, drive prefixes). We only *list* archives today, so
+        // this is a display concern rather than a write one — but showing the
+        // safe form means the listing cannot claim a path the extractor would
+        // refuse, and falling back to the raw name keeps hostile entries
+        // visible rather than silently hidden.
+        //
+        // Either way the text is sanitized: a stored name can carry ANSI
+        // escapes, newlines, or a bidi override, and it is rendered directly.
+        let raw = entry
+            .enclosed_name()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| entry.name().to_string());
         entries.push(ArchiveItem {
-            name: entry.name().to_string().into(),
+            name: crate::security::text::sanitize_label(&raw).into(),
             size: entry.size(),
             is_dir: entry.is_dir(),
         });
@@ -190,7 +204,13 @@ fn load_audio_meta(path: &Path) -> PreviewContent {
             if let Some(value) = value
                 && !value.is_empty()
             {
-                rows.push((label.to_string().into(), value.into_owned().into()));
+                // Tag values are arbitrary text from a file the user
+                // downloaded, and they render in the inspector, the media
+                // panel, and the transport bar.
+                let clean = crate::security::text::sanitize_label(&value);
+                if !clean.is_empty() {
+                    rows.push((label.to_string().into(), clean.into()));
+                }
             }
         };
         push("Title", tag.title());

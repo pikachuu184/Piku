@@ -337,7 +337,12 @@ fn decode_loop(
     if seek_ms > 0 {
         cmd.seek(format!("{:.3}", seek_ms as f64 / 1000.0));
     }
-    cmd.input(path.to_string_lossy())
+    // `to_string_lossy` would replace a non-UTF-8 component with U+FFFD and
+    // hand ffmpeg a path that does not exist (or, worse, a different one).
+    // `FfmpegCommand::input` takes a string, so pass the raw `OsStr` as an
+    // argument instead — argv carries bytes, no lossy round-trip.
+    cmd.arg("-i")
+        .arg(path.as_os_str())
         .arg("-an")
         .args(["-vf", &format!("scale='min({PREVIEW_WIDTH},iw)':-2")])
         .pix_fmt("rgba")

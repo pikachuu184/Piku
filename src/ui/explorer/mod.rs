@@ -6,6 +6,10 @@ mod file_list;
 mod toolbar;
 
 pub use explorer_panel::ExplorerPanel;
+/// Hand a path to the OS default handler, canonicalizing and re-authorizing
+/// the resolved target first. Exported so the inspector and media panel use
+/// this one hardened path rather than calling `open::that_detached` directly.
+pub use explorer_panel::shell_open;
 
 use std::path::PathBuf;
 

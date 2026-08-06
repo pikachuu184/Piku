@@ -112,6 +112,9 @@ pub struct ExplorerPanel {
     /// Bumped only when the watcher is actually re-registered, so the drain
     /// task's staleness check is independent of the listing generation.
     watch_gen: u64,
+    /// Directory whose watch registration failed, so it is not retried on
+    /// every reload. Cleared whenever the watched directory changes.
+    watch_failed_for: Option<PathBuf>,
     pub(super) scroll: VirtualListScrollHandle,
     pub(super) tab_panel: Option<WeakEntity<TabPanel>>,
     /// True while showing recursive-search results instead of the folder
@@ -231,6 +234,7 @@ impl ExplorerPanel {
             watcher: None,
             watched: None,
             watch_gen: 0,
+            watch_failed_for: None,
             scroll: VirtualListScrollHandle::new(),
             tab_panel: None,
             searching: false,
@@ -395,6 +399,11 @@ impl ExplorerPanel {
                         this.entries.clear();
                         this.selected.clear();
                         this.push_selection_ctx(cx);
+                        // Drop the watcher too. Leaving it bound to the
+                        // previous directory means every unrelated event
+                        // there re-lists the directory we failed to open —
+                        // forever, since only a *successful* load re-arms.
+                        this.stop_watch();
                     }
                 }
                 cx.notify();
@@ -472,6 +481,17 @@ impl ExplorerPanel {
 
     // -- Watching ----------------------------------------------------------
 
+    /// Tear down the current watcher and retire its drain task.
+    ///
+    /// Bumping `watch_gen` is what stops the old task: it compares the
+    /// generation it captured and exits when it no longer matches.
+    fn stop_watch(&mut self) {
+        self.watcher = None;
+        self.watched = None;
+        self.watch_failed_for = None;
+        self.watch_gen = self.watch_gen.wrapping_add(1);
+    }
+
     /// Ensure a watcher is registered on the current directory.
     ///
     /// Called after every load, including the reloads that watcher events
@@ -480,16 +500,24 @@ impl ExplorerPanel {
     /// every file touched in the folder; in a home directory that fired about
     /// once a second at rest.
     fn start_watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.watcher.is_some() && self.watched.as_deref() == Some(self.session.cwd.as_path()) {
+        let cwd = self.session.cwd.as_path();
+        // Already watching this directory: nothing to do.
+        if self.watcher.is_some() && self.watched.as_deref() == Some(cwd) {
+            return;
+        }
+        // Registration already failed for this directory. Without this the
+        // guard above can never short-circuit (it requires `watcher.is_some()`)
+        // and every reload retries a blocking `inotify_add_watch` — permanent
+        // on a machine at its watch limit or on a mount `notify` cannot watch.
+        if self.watch_failed_for.as_deref() == Some(cwd) {
             return;
         }
 
-        self.watcher = None;
-        self.watched = None;
-        self.watch_gen = self.watch_gen.wrapping_add(1);
+        self.stop_watch();
         let watch_gen = self.watch_gen;
 
         let Ok((watcher, mut rx)) = DirWatcher::watch(&self.session.cwd) else {
+            self.watch_failed_for = Some(self.session.cwd.clone());
             return;
         };
         self.watcher = Some(watcher);
@@ -1558,7 +1586,7 @@ impl Panel for ExplorerPanel {
 /// sanitize the lexical path, resolve junctions/symlinks with
 /// `canonicalize`, then re-authorize the *real* target — a link inside an
 /// allowed root must not open something outside it.
-pub(super) fn shell_open(name: &str, path: &Path, window: &mut Window, cx: &mut App) {
+pub fn shell_open(name: &str, path: &Path, window: &mut Window, cx: &mut App) {
     let resolved = crate::storage::local()
         .guard()
         .sanitize(path)

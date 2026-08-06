@@ -10,6 +10,7 @@
 //! (the old flat files are consumed).
 
 use std::fs;
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,10 @@ impl WorkspaceStore {
         let name = self.validated_name(name, None)?;
         let meta = new_meta(&name);
         let id = meta.id.clone();
+        // Self-generated and therefore always well-formed, but validated
+        // anyway so the invariant holds at every site that builds a path from
+        // an id rather than only at the ones that delete.
+        validated_workspace_id(&id)?;
         let _ = fs::create_dir_all(persistence::state_path(&format!("workspaces/{id}")));
         self.index.workspaces.push(meta);
         self.save();
@@ -158,6 +163,7 @@ impl WorkspaceStore {
             .iter()
             .find(|w| w.id == id)
             .ok_or_else(|| "Workspace not found".to_string())?;
+        let id = validated_workspace_id(id)?;
         let copy_name = self.available_copy_name(&source.name.clone());
         let new_id = self.create(&copy_name)?;
         for file in ["layout.json", "navigation.json"] {
@@ -183,13 +189,15 @@ impl WorkspaceStore {
             return Err("Workspace not found".into());
         };
 
-        // Ids are self-generated, but never remove a directory based on a
-        // string that could traverse out of the data dir.
-        if id.is_empty() || id.contains(['/', '\\', ':']) || id.contains("..") {
+        // Never remove a directory based on a string that could traverse out
+        // of the data dir.
+        let id = validated_workspace_id(id)?;
+        let dir = persistence::state_path(&format!("workspaces/{id}"));
+        // A real check, not a `debug_assert!`: this guards an `fs::remove_dir_all`
+        // and must hold in release builds too.
+        if !dir.starts_with(persistence::data_dir()) {
             return Err("Invalid workspace id".into());
         }
-        let dir = persistence::state_path(&format!("workspaces/{id}"));
-        debug_assert!(dir.starts_with(persistence::data_dir()));
         if dir.exists() {
             fs::remove_dir_all(&dir).map_err(|error| error.to_string())?;
         }
@@ -249,6 +257,26 @@ impl WorkspaceStore {
     }
 }
 
+/// Reject any workspace id that could escape the data directory when
+/// interpolated into a path.
+///
+/// Ids are self-generated, so this should never fire — but `workspaces.json`
+/// is a plain file a user (or anything else on the machine) can edit, and the
+/// id from it is joined straight into paths that get created, copied, and
+/// **recursively deleted**. Previously only `delete` checked, and its
+/// companion `debug_assert!` compiled out of release builds.
+fn validated_workspace_id(id: &str) -> Result<&str, String> {
+    if id.is_empty()
+        || id.contains(['/', '\\', ':', '\0'])
+        || id.contains("..")
+        || id == "."
+        || Path::new(id).components().count() != 1
+    {
+        return Err("Invalid workspace id".into());
+    }
+    Ok(id)
+}
+
 fn new_meta(name: &str) -> WorkspaceMeta {
     let now = Utc::now();
     WorkspaceMeta {
@@ -262,6 +290,42 @@ fn new_meta(name: &str) -> WorkspaceMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `workspaces.json` is an ordinary file on disk, so an id read from it is
+    /// untrusted input that gets joined into paths which are created, copied,
+    /// and recursively **deleted**.
+    #[test]
+    fn workspace_ids_that_could_escape_the_data_dir_are_rejected() {
+        for good in ["ws-1", "ws-1700000000000", "Default", "a.b"] {
+            assert!(
+                validated_workspace_id(good).is_ok(),
+                "rejected a legitimate id: {good:?}"
+            );
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../etc",
+            "a/b",
+            "a\\b",
+            "C:",
+            "..\\..\\windows",
+            "foo/../..",
+            "\0",
+        ] {
+            assert!(
+                validated_workspace_id(bad).is_err(),
+                "accepted a traversal-capable id: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_ids_always_pass_validation() {
+        // The generator and the validator must agree, or `create` fails.
+        assert!(validated_workspace_id(&new_meta("Default").id).is_ok());
+    }
 
     fn store_with(names: &[&str]) -> WorkspaceStore {
         let workspaces = names

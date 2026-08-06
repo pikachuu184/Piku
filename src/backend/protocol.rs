@@ -209,6 +209,28 @@ pub struct StreamSink<T, S = ()> {
     token: CancellationToken,
 }
 
+/// Guard against the one way to misuse this type.
+///
+/// `mpsc::Sender::blocking_send` is *designed* for the synchronous body of a
+/// `spawn_blocking` worker — that is not the hazard. The hazard is calling it
+/// from an **async task**, where it panics with "Cannot block the current
+/// thread from within a runtime".
+///
+/// That panic would be silent in production: the task unwinds, the sink drops,
+/// the consumer sees the channel close, and the view waits forever on a `Done`
+/// that never arrives. Rather than guess at Tokio's internal state, we assert
+/// against a marker that [`crate::backend::runtime::BackendRuntime::blocking`]
+/// sets for exactly the duration of the closure it runs — so the check is
+/// precise about *our* sanctioned blocking context rather than about Tokio's.
+#[inline]
+fn debug_assert_blocking_context(method: &str) {
+    debug_assert!(
+        crate::backend::runtime::in_blocking_context(),
+        "`{method}` was called outside `runtime.blocking(..)`; \
+         use the async variant (`send` / `finish_async`) from async code"
+    );
+}
+
 impl<T, S> StreamSink<T, S> {
     /// Whether the request has been cancelled or the consumer has gone away.
     /// Workers should check this at loop heads.
@@ -221,23 +243,42 @@ impl<T, S> StreamSink<T, S> {
     /// Returns `false` if the item could not be delivered, which always means
     /// "stop working" — either cancelled or the consumer dropped.
     pub fn send_blocking(&self, item: StreamItem<T, S>) -> bool {
-        if self.token.is_cancelled() {
+        if self.is_cancelled() {
             return false;
         }
+        debug_assert_blocking_context("send_blocking");
         self.tx.blocking_send(item).is_ok()
     }
 
     /// Send from an async context.
     pub async fn send(&self, item: StreamItem<T, S>) -> bool {
-        if self.token.is_cancelled() {
+        if self.is_cancelled() {
             return false;
         }
         self.tx.send(item).await.is_ok()
     }
 
-    /// Deliver the terminal item. Consumes the sink so nothing can follow it.
-    pub fn finish(self, result: Result<S, BackendError>) {
-        let _ = self.tx.blocking_send(StreamItem::Done(result));
+    /// Deliver the terminal item from a **blocking** context. Consumes the
+    /// sink so nothing can follow it.
+    ///
+    /// Unlike the non-terminal sends this does not bail on cancellation — a
+    /// cancelled request still deserves its `Done`, so the consumer can clear
+    /// its loading state. It uses `try_send` first precisely because a
+    /// cancelled-but-undrained stream has a full channel and blocking there
+    /// would hold a worker past the shutdown deadline.
+    pub fn finish_blocking(self, result: Result<S, BackendError>) {
+        debug_assert_blocking_context("finish_blocking");
+        let mut item = StreamItem::Done(result);
+        match self.tx.try_send(item) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(returned)) => {
+                item = returned;
+                // The consumer is alive but behind; a bounded wait is correct.
+                let _ = self.tx.blocking_send(item);
+            }
+            // Receiver gone: nobody to tell, and that is fine.
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
     }
 
     /// Deliver the terminal item from an async context.
@@ -362,15 +403,50 @@ mod tests {
     #[test]
     fn a_stream_delivers_batches_then_done() {
         let (sink, mut stream) = stream_channel::<u32, usize>(4);
-        std::thread::spawn(move || {
+        // Produced the way a real service does: inside `runtime.blocking`,
+        // which is the only context where the `*_blocking` senders are legal.
+        rt().blocking(move || {
             sink.send_blocking(StreamItem::Batch(vec![1, 2, 3]));
-            sink.finish(Ok(3));
+            sink.finish_blocking(Ok(3));
         });
         let first = block_on(stream.next()).expect("batch");
         assert!(matches!(first, StreamItem::Batch(ref b) if b == &[1, 2, 3]));
         let last = block_on(stream.next()).expect("done");
         assert!(matches!(last, StreamItem::Done(Ok(3))));
         assert!(last.is_done());
+    }
+
+    #[test]
+    fn the_terminal_item_is_delivered_even_when_the_stream_is_cancelled() {
+        // A cancelled request still owes its consumer a `Done`, or the view
+        // never clears its loading state. Regression guard for the earlier
+        // `finish` that bailed on cancellation and could block forever.
+        let (sink, mut stream) = stream_channel::<u32, usize>(1);
+        stream.inflight().cancel();
+        rt().blocking(move || {
+            // Non-terminal sends correctly refuse once cancelled...
+            assert!(!sink.send_blocking(StreamItem::Batch(vec![1])));
+            // ...but the terminal one still lands.
+            sink.finish_blocking(Err(BackendError::ShuttingDown));
+        });
+        let last = block_on(stream.next()).expect("done still delivered");
+        assert!(matches!(last, StreamItem::Done(Err(_))));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "outside `runtime.blocking")]
+    fn blocking_sends_from_the_wrong_context_are_caught_in_debug() {
+        let (sink, _stream) = stream_channel::<u32, ()>(4);
+        // A plain thread is not a sanctioned blocking context: in real code
+        // this shape would be an async task, where `blocking_send` panics
+        // deep inside Tokio and silently loses the terminal item.
+        std::thread::spawn(move || {
+            sink.send_blocking(StreamItem::Batch(vec![1]));
+        })
+        .join()
+        .expect_err("the guard should have fired");
+        panic!("`send_blocking` outside `runtime.blocking` was not caught");
     }
 
     #[test]
