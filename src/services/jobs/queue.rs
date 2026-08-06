@@ -12,6 +12,7 @@ use gpui_component::WindowExt as _;
 
 use crate::security::file_name::validate_name;
 use crate::security::path_guard::PathGuard;
+use crate::services::jobs::label;
 use crate::services::jobs::{Job, JobEvent, JobKind, JobStatus};
 use crate::storage::provider::StorageProvider;
 
@@ -64,11 +65,7 @@ impl JobQueue {
         } else {
             JobKind::Copy
         };
-        let title = if sources.len() == 1 {
-            format!("{} “{}”", kind.label(), file_label(&sources[0]))
-        } else {
-            format!("{} {} items", kind.label(), sources.len())
-        };
+        let title = label::transfer_title(kind.label(), &sources[0], sources.len());
         let provider = crate::storage::local_dyn();
         let guard = crate::storage::local().guard().clone();
         self.spawn_job(kind, title, window, cx, move |tx, cancel| {
@@ -85,11 +82,7 @@ impl JobQueue {
         if paths.is_empty() {
             return;
         }
-        let title = if paths.len() == 1 {
-            format!("Deleting “{}”", file_label(&paths[0]))
-        } else {
-            format!("Deleting {} items", paths.len())
-        };
+        let title = label::delete_title(&paths[0], paths.len());
         let provider = crate::storage::local_dyn();
         self.spawn_job(JobKind::Delete, title, window, cx, move |tx, _cancel| {
             let count = paths.len();
@@ -99,7 +92,7 @@ impl JobQueue {
             });
             let result = provider
                 .delete_to_trash(&paths)
-                .map(|_| format!("Moved {count} item{} to the Recycle Bin", plural(count)))
+                .map(|_| label::delete_summary(count))
                 .map_err(|error| error.to_string());
             let _ = tx.unbounded_send(JobEvent::Progress {
                 delta_bytes: 0,
@@ -124,12 +117,12 @@ impl JobQueue {
             window.push_notification(crate::ui::toast::error(error), cx);
             return;
         }
-        let title = format!("Renaming “{}”", file_label(&from));
+        let title = label::rename_title(&from);
         let provider = crate::storage::local_dyn();
         self.spawn_job(JobKind::Rename, title, window, cx, move |tx, _cancel| {
             let result = provider
                 .rename(&from, &to)
-                .map(|_| format!("Renamed to “{}”", file_label(&to)))
+                .map(|_| label::rename_summary(&to))
                 .map_err(|error| error.to_string());
             let _ = tx.unbounded_send(JobEvent::Finished(result));
         });
@@ -147,12 +140,12 @@ impl JobQueue {
             window.push_notification(crate::ui::toast::error(error), cx);
             return;
         }
-        let title = format!("Creating “{}”", file_label(&path));
+        let title = label::create_title(&path);
         let provider = crate::storage::local_dyn();
         self.spawn_job(JobKind::NewFolder, title, window, cx, move |tx, _cancel| {
             let result = provider
                 .create_dir(&path)
-                .map(|_| format!("Created “{}”", file_label(&path)))
+                .map(|_| label::create_summary(&path))
                 .map_err(|error| error.to_string());
             let _ = tx.unbounded_send(JobEvent::Finished(result));
         });
@@ -165,12 +158,12 @@ impl JobQueue {
             window.push_notification(crate::ui::toast::error(error), cx);
             return;
         }
-        let title = format!("Creating “{}”", file_label(&path));
+        let title = label::create_title(&path);
         let provider = crate::storage::local_dyn();
         self.spawn_job(JobKind::NewFile, title, window, cx, move |tx, _cancel| {
             let result = provider
                 .create_file(&path)
-                .map(|_| format!("Created “{}”", file_label(&path)))
+                .map(|_| label::create_summary(&path))
                 .map_err(|error| error.to_string());
             let _ = tx.unbounded_send(JobEvent::Finished(result));
         });
@@ -186,7 +179,7 @@ impl JobQueue {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Fetching “{remote}”");
+        let title = label::fetch_title(&remote);
         let backend = crate::state::PikuState::global(cx).git.read(cx).backend();
         let job_root = root;
         self.spawn_job(JobKind::GitFetch, title, window, cx, move |tx, cancel| {
@@ -195,12 +188,7 @@ impl JobQueue {
             let (ok, message) = match &result {
                 Ok(outcome) => (
                     true,
-                    format!(
-                        "Fetched “{}” — {} ref{} updated",
-                        outcome.remote,
-                        outcome.updated_refs,
-                        plural(outcome.updated_refs)
-                    ),
+                    label::fetch_summary(&outcome.remote, outcome.updated_refs),
                 ),
                 Err(error) => (false, error.to_string()),
             };
@@ -208,7 +196,7 @@ impl JobQueue {
             let _ = tx.unbounded_send(JobEvent::Finished(if ok {
                 Ok(message)
             } else if cancel.load(Ordering::Relaxed) {
-                Err("cancelled".into())
+                Err(label::CANCELLED.into())
             } else {
                 Err(message)
             }));
@@ -288,9 +276,10 @@ impl JobQueue {
                     window.push_notification(crate::ui::toast::success(message), cx);
                 }
                 Err(error) => {
-                    if error == "cancelled" {
+                    if label::is_cancelled(&error) {
                         job.status = JobStatus::Cancelled;
-                        window.push_notification(crate::ui::toast::info("Operation cancelled"), cx);
+                        window
+                            .push_notification(crate::ui::toast::info(label::CANCELLED_TOAST), cx);
                     } else {
                         job.status = JobStatus::Failed(error.clone());
                         window.push_notification(crate::ui::toast::error(error), cx);
@@ -315,16 +304,6 @@ impl JobQueue {
             });
         }
     }
-}
-
-fn file_label(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-fn plural(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
 }
 
 // ---------------------------------------------------------------------------
@@ -367,11 +346,7 @@ fn copy_work(
     // sanitized (normalized) paths so `dest\..\src` aliases cannot slip past.
     for source in &sources {
         if dest_dir.starts_with(source) {
-            let _ = tx.unbounded_send(JobEvent::Finished(Err(format!(
-                "Cannot {} “{}” into itself",
-                if is_move { "move" } else { "copy" },
-                file_label(source)
-            ))));
+            let _ = tx.unbounded_send(JobEvent::Finished(Err(label::into_itself(is_move, source))));
             return;
         }
     }
@@ -381,7 +356,7 @@ fn copy_work(
     let mut total_items = 0usize;
     for source in &sources {
         if scan(&guard, source, &mut total_bytes, &mut total_items, &cancel).is_err() {
-            let _ = tx.unbounded_send(JobEvent::Finished(Err("cancelled".into())));
+            let _ = tx.unbounded_send(JobEvent::Finished(Err(label::CANCELLED.into())));
             return;
         }
     }
@@ -396,7 +371,7 @@ fn copy_work(
 
     for source in &sources {
         if cancel.load(Ordering::Relaxed) {
-            result = Err("cancelled".into());
+            result = Err(label::CANCELLED.into());
             break;
         }
         let Some(name) = source.file_name() else {
@@ -428,10 +403,7 @@ fn copy_work(
             Ok(items) => {
                 copied += items;
                 if is_move && let Err(error) = remove_recursive(provider.as_ref(), &guard, source) {
-                    result = Err(format!(
-                        "Copied, but could not remove source “{}”: {error}",
-                        file_label(source)
-                    ));
+                    result = Err(label::source_cleanup_failed(source, &error));
                     break;
                 }
             }
@@ -442,12 +414,7 @@ fn copy_work(
         }
     }
 
-    let verb = if is_move { "Moved" } else { "Copied" };
-    let summary = format!(
-        "{verb} {} item{}",
-        moved_fast + copied,
-        plural(moved_fast + copied)
-    );
+    let summary = label::transfer_summary(is_move, moved_fast + copied);
     let _ = tx.unbounded_send(JobEvent::Finished(result.map(|_| summary)));
 }
 
@@ -494,7 +461,7 @@ fn copy_recursive(
     cancel: &Arc<AtomicBool>,
 ) -> Result<usize, String> {
     if cancel.load(Ordering::Relaxed) {
-        return Err("cancelled".into());
+        return Err(label::CANCELLED.into());
     }
     if guard.sanitize(source).is_err() || guard.sanitize(target).is_err() {
         return Ok(0);

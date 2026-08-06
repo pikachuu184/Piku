@@ -49,7 +49,6 @@ impl ExplorerPanel {
         } else {
             entry.name.clone().into()
         };
-        let source_id = self.session_id();
         let is_dir = entry.is_dir();
         let dir_dest = entry.path.clone();
 
@@ -92,7 +91,6 @@ impl ExplorerPanel {
                     tile.on_drag(
                         DraggedPaths {
                             paths: drag_paths.clone(),
-                            source_id: source_id.clone(),
                         },
                         move |_, _, _, cx| {
                             cx.new(|_| DragPreview {

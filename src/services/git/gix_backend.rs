@@ -1102,7 +1102,7 @@ impl GitBackend for GixBackend {
                 "HEAD",
                 message,
                 tree_id,
-                parent.into_iter(),
+                parent,
             )
             .map_err(GitError::msg)?;
         Ok(id.to_string())

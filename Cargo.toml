@@ -25,6 +25,26 @@ gix = { version = "0.85", features = [
     "tree-editor",
 ] }
 
+# Async backend runtime. Deliberately narrow: PIKU opens no sockets, so `net`
+# and the IO driver are off. What Tokio is actually here for is the primitives
+# gpui's executor lacks — CancellationToken, Semaphore, bounded mpsc,
+# TaskTracker, timers — plus `spawn_blocking` for filesystem work (there is no
+# true async local filesystem; `tokio::fs` is spawn_blocking internally, so we
+# call it once per logical operation rather than per syscall).
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "macros",
+] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+# CPU-bound fan-out (hashing, image decode). Kept separate from Tokio's
+# blocking pool, which is sized for I/O waits, not for saturating cores.
+rayon = "1"
+# Lighter than std for the short critical sections around the caches.
+parking_lot = "0.12"
+
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -61,6 +81,15 @@ pdfium-render = "0.8"
 # already covered by serde_json).
 toml = "0.8"
 serde_yml = "0.0.12"
+
+# gpui_platform's Linux/FreeBSD windowing backends are opt-in features and
+# default to off, so a build without them links fine and then panics at
+# startup with "At least one of the wayland or x11 features must be enabled".
+# Enabling both lets one binary pick its backend at runtime. Features are
+# unioned with the base declaration above, and this whole block is inert on
+# Windows and macOS, which have their own backends.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["wayland", "x11"] }
 
 [build-dependencies]
 # Downloads the standalone ffmpeg binary at build time so it ships with the app

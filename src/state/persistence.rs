@@ -23,6 +23,7 @@ pub fn state_path(name: &str) -> PathBuf {
 /// Atomic write: serialize to a temp file, then rename over the target so a
 /// crash can never leave a truncated state file.
 pub fn save_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<()> {
+    crate::app::diagnostics::assert_not_rendering("persistence::save_json");
     let path = state_path(name);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
@@ -43,6 +44,7 @@ pub fn save_json<T: Serialize>(name: &str, value: &T) -> anyhow::Result<()> {
 const MAX_STATE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn load_json<T: DeserializeOwned>(name: &str) -> anyhow::Result<T> {
+    crate::app::diagnostics::assert_not_rendering("persistence::load_json");
     let path = state_path(name);
     let len = fs::metadata(&path)
         .with_context(|| format!("reading {}", path.display()))?

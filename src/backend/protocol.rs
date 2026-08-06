@@ -1,0 +1,430 @@
+//! The wire between the UI and the backend services.
+//!
+//! Two shapes, and only two:
+//!
+//! * [`BackendTask<T>`] — one request, one answer (`OpenFolder`, `RenameEntry`).
+//! * [`BackendStream<T, S>`] — one request, many items, then a terminal
+//!   summary (`ReadDirectory`, `MoveEntries`, `CalculateFolderSize`).
+//!
+//! Both cancel when dropped. That is the whole cancellation story: the four
+//! hand-rolled `Arc<AtomicBool>` flags and four `generation: u64` counters in
+//! the current UI collapse into holding (or not holding) an [`Inflight`].
+
+// This module is the shared vocabulary for services that land over
+// Stages 2-5, so parts of it are legitimately unused right now.
+// `expect` rather than `allow`: once every shape is constructed, this attribute itself
+// starts erroring, which is the reminder to delete it.
+#![expect(dead_code)]
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
+
+use crate::backend::error::BackendError;
+
+/// Correlates a UI dispatch with its backend spans and its result.
+///
+/// Recorded on the operation's root span as `req`, echoed by the dispatch
+/// layer when the result is applied, so a log can be read end to end.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct RequestId(pub u64);
+
+impl RequestId {
+    pub fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl std::fmt::Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Progress for operations that know their totals.
+///
+/// Totals are zero until a scan establishes them; consumers should treat
+/// `total_* == 0` as "indeterminate" rather than "complete".
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+    pub done_items: u64,
+    pub total_items: u64,
+}
+
+impl Progress {
+    /// Completion in `0.0..=100.0`, byte-weighted when byte totals are known.
+    /// Mirrors `Job::percent` so the status bar reads the same either way.
+    pub fn percent(&self) -> f32 {
+        if self.total_bytes > 0 {
+            (self.done_bytes as f64 / self.total_bytes as f64 * 100.0) as f32
+        } else if self.total_items > 0 {
+            (self.done_items as f64 / self.total_items as f64 * 100.0) as f32
+        } else {
+            0.0
+        }
+    }
+}
+
+/// One item off a [`BackendStream`].
+///
+/// Two type parameters so each service keeps its own payload *and* its own
+/// terminal summary. A single shared response enum would force every call site
+/// to match arms it knows cannot occur — exactly what `#![deny(clippy::panic)]`
+/// exists to prevent.
+#[derive(Debug)]
+pub enum StreamItem<T, S = ()> {
+    /// A batch of results. Batched rather than per-item so a 50 000-entry
+    /// listing costs tens of channel sends, not 50 000.
+    Batch(Vec<T>),
+    /// Updated totals for a long-running operation.
+    Progress(Progress),
+    /// Terminal. Exactly one of these arrives, and nothing follows it.
+    Done(Result<S, BackendError>),
+}
+
+impl<T, S> StreamItem<T, S> {
+    pub fn is_done(&self) -> bool {
+        matches!(self, Self::Done(_))
+    }
+}
+
+/// A cancellation handle for work in flight.
+///
+/// Dropping it cancels the request. Panels hold one per concurrent operation
+/// (`dir_req`, `search_req`); assigning a new one drops the old, which both
+/// supersedes the result *and* actually stops the worker — the current
+/// generation counters only do the former.
+#[derive(Debug)]
+pub struct Inflight {
+    id: RequestId,
+    token: CancellationToken,
+}
+
+impl Inflight {
+    pub fn id(&self) -> RequestId {
+        self.id
+    }
+
+    /// Cancel now rather than at drop.
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+}
+
+impl Drop for Inflight {
+    fn drop(&mut self) {
+        self.token.cancel();
+    }
+}
+
+/// A one-shot request. Cancels on drop.
+#[derive(Debug)]
+pub struct BackendTask<T> {
+    id: RequestId,
+    token: CancellationToken,
+    /// `None` once joined. Taken rather than moved out because `BackendTask`
+    /// implements `Drop` and so cannot be destructured.
+    rx: Option<oneshot::Receiver<T>>,
+}
+
+impl<T> BackendTask<T> {
+    pub fn id(&self) -> RequestId {
+        self.id
+    }
+
+    /// Await the answer.
+    ///
+    /// `Err(BackendError::ShuttingDown)` means the worker went away without
+    /// replying — the runtime is draining, or the task was cancelled.
+    ///
+    /// `self` stays alive across the await on purpose: the cancellation token
+    /// must outlive the wait, or joining would cancel the very work it is
+    /// waiting for.
+    pub async fn join(mut self) -> Result<T, BackendError> {
+        let Some(rx) = self.rx.take() else {
+            return Err(BackendError::ShuttingDown);
+        };
+        rx.await.map_err(|_| BackendError::ShuttingDown)
+    }
+}
+
+impl<T> Drop for BackendTask<T> {
+    fn drop(&mut self) {
+        self.token.cancel();
+    }
+}
+
+/// A streaming request. Cancels on drop.
+#[derive(Debug)]
+pub struct BackendStream<T, S = ()> {
+    id: RequestId,
+    token: CancellationToken,
+    rx: mpsc::Receiver<StreamItem<T, S>>,
+}
+
+impl<T, S> BackendStream<T, S> {
+    pub fn id(&self) -> RequestId {
+        self.id
+    }
+
+    /// A handle that cancels this stream when dropped.
+    ///
+    /// Cloning the token rather than the stream keeps ownership clear: the
+    /// consumer drains, the panel holds the leash.
+    pub fn inflight(&self) -> Inflight {
+        Inflight {
+            id: self.id,
+            token: self.token.clone(),
+        }
+    }
+
+    /// Next item, or `None` once the producer has finished and the channel is
+    /// drained.
+    pub async fn next(&mut self) -> Option<StreamItem<T, S>> {
+        self.rx.recv().await
+    }
+}
+
+impl<T, S> Drop for BackendStream<T, S> {
+    fn drop(&mut self) {
+        self.token.cancel();
+    }
+}
+
+/// The producer half of a [`BackendStream`], handed to the worker.
+///
+/// Sends are bounded, so a UI that stops draining stops the producer — which
+/// is correct: a superseded pane should stop burning I/O rather than filling
+/// memory with results nobody will render.
+pub struct StreamSink<T, S = ()> {
+    tx: mpsc::Sender<StreamItem<T, S>>,
+    token: CancellationToken,
+}
+
+impl<T, S> StreamSink<T, S> {
+    /// Whether the request has been cancelled or the consumer has gone away.
+    /// Workers should check this at loop heads.
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled() || self.tx.is_closed()
+    }
+
+    /// Send from a **blocking** context (inside `runtime.blocking(..)`).
+    ///
+    /// Returns `false` if the item could not be delivered, which always means
+    /// "stop working" — either cancelled or the consumer dropped.
+    pub fn send_blocking(&self, item: StreamItem<T, S>) -> bool {
+        if self.token.is_cancelled() {
+            return false;
+        }
+        self.tx.blocking_send(item).is_ok()
+    }
+
+    /// Send from an async context.
+    pub async fn send(&self, item: StreamItem<T, S>) -> bool {
+        if self.token.is_cancelled() {
+            return false;
+        }
+        self.tx.send(item).await.is_ok()
+    }
+
+    /// Deliver the terminal item. Consumes the sink so nothing can follow it.
+    pub fn finish(self, result: Result<S, BackendError>) {
+        let _ = self.tx.blocking_send(StreamItem::Done(result));
+    }
+
+    /// Deliver the terminal item from an async context.
+    pub async fn finish_async(self, result: Result<S, BackendError>) {
+        let _ = self.tx.send(StreamItem::Done(result)).await;
+    }
+}
+
+/// Create a one-shot request/response pair.
+pub fn task_channel<T>() -> (TaskSink<T>, BackendTask<T>) {
+    let id = RequestId::next();
+    let token = CancellationToken::new();
+    let (tx, rx) = oneshot::channel();
+    (
+        TaskSink {
+            tx: Some(tx),
+            token: token.clone(),
+        },
+        BackendTask {
+            id,
+            token,
+            rx: Some(rx),
+        },
+    )
+}
+
+/// The producer half of a [`BackendTask`].
+pub struct TaskSink<T> {
+    tx: Option<oneshot::Sender<T>>,
+    token: CancellationToken,
+}
+
+impl<T> TaskSink<T> {
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    /// Deliver the answer. Dropping the sink without calling this surfaces as
+    /// `BackendError::ShuttingDown` at the consumer.
+    pub fn finish(mut self, value: T) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(value);
+        }
+    }
+}
+
+/// Create a streaming request/response pair with the given queue depth.
+///
+/// `capacity` is in *batches*, not items. Small is right: it bounds memory
+/// while still letting the producer run a batch ahead of the renderer.
+pub fn stream_channel<T, S>(capacity: usize) -> (StreamSink<T, S>, BackendStream<T, S>) {
+    let id = RequestId::next();
+    let token = CancellationToken::new();
+    let (tx, rx) = mpsc::channel(capacity.max(1));
+    (
+        StreamSink {
+            tx,
+            token: token.clone(),
+        },
+        BackendStream { id, token, rx },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rt() -> &'static crate::backend::runtime::BackendRuntime {
+        crate::backend::runtime::get().expect("runtime")
+    }
+
+    fn block_on<F: Future>(f: F) -> F::Output {
+        rt().handle().block_on(f)
+    }
+
+    #[test]
+    fn request_ids_are_unique_and_increasing() {
+        let a = RequestId::next();
+        let b = RequestId::next();
+        assert!(b > a);
+    }
+
+    #[test]
+    fn progress_is_byte_weighted_when_bytes_are_known() {
+        let p = Progress {
+            done_bytes: 50,
+            total_bytes: 200,
+            done_items: 1,
+            total_items: 2,
+        };
+        assert_eq!(p.percent(), 25.0);
+    }
+
+    #[test]
+    fn progress_falls_back_to_items_then_zero() {
+        let items = Progress {
+            done_items: 3,
+            total_items: 4,
+            ..Default::default()
+        };
+        assert_eq!(items.percent(), 75.0);
+        assert_eq!(Progress::default().percent(), 0.0);
+    }
+
+    #[test]
+    fn a_task_delivers_its_value() {
+        let (sink, task) = task_channel::<u32>();
+        sink.finish(9);
+        assert_eq!(block_on(task.join()).unwrap(), 9);
+    }
+
+    #[test]
+    fn a_dropped_task_sink_reports_shutting_down() {
+        let (sink, task) = task_channel::<u32>();
+        drop(sink);
+        assert!(matches!(
+            block_on(task.join()),
+            Err(BackendError::ShuttingDown)
+        ));
+    }
+
+    #[test]
+    fn a_stream_delivers_batches_then_done() {
+        let (sink, mut stream) = stream_channel::<u32, usize>(4);
+        std::thread::spawn(move || {
+            sink.send_blocking(StreamItem::Batch(vec![1, 2, 3]));
+            sink.finish(Ok(3));
+        });
+        let first = block_on(stream.next()).expect("batch");
+        assert!(matches!(first, StreamItem::Batch(ref b) if b == &[1, 2, 3]));
+        let last = block_on(stream.next()).expect("done");
+        assert!(matches!(last, StreamItem::Done(Ok(3))));
+        assert!(last.is_done());
+    }
+
+    #[test]
+    fn dropping_the_stream_cancels_the_producer() {
+        let (sink, stream) = stream_channel::<u32, ()>(1);
+        assert!(!sink.is_cancelled());
+        drop(stream);
+        assert!(sink.is_cancelled());
+        // And a send after cancellation refuses rather than blocking forever.
+        assert!(!sink.send_blocking(StreamItem::Batch(vec![1])));
+    }
+
+    #[test]
+    fn an_inflight_outlives_the_stream_and_still_cancels() {
+        let (sink, stream) = stream_channel::<u32, ()>(1);
+        let inflight = stream.inflight();
+        assert_eq!(inflight.id(), stream.id());
+        assert!(!inflight.is_cancelled());
+        inflight.cancel();
+        assert!(sink.is_cancelled());
+    }
+
+    #[test]
+    fn dropping_an_inflight_cancels() {
+        let (sink, _stream) = stream_channel::<u32, ()>(1);
+        {
+            let _leash = _stream.inflight();
+        }
+        assert!(sink.is_cancelled());
+    }
+
+    #[test]
+    fn a_dropped_task_cancels_its_sink() {
+        let (sink, task) = task_channel::<u32>();
+        assert!(!sink.is_cancelled());
+        drop(task);
+        assert!(sink.is_cancelled());
+    }
+
+    #[test]
+    fn joining_a_task_does_not_cancel_it_first() {
+        // Regression guard: an earlier shape dropped `self` (and therefore the
+        // token) before awaiting, cancelling the work it was waiting for.
+        let (sink, task) = task_channel::<u32>();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if sink.is_cancelled() {
+                return false;
+            }
+            sink.finish(1);
+            true
+        });
+        let got = block_on(task.join());
+        assert!(handle.join().unwrap(), "the sink was cancelled mid-flight");
+        assert_eq!(got.unwrap(), 1);
+    }
+}

@@ -165,39 +165,45 @@ fn starts_with_ci(path: &Path, prefix: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// A guard rooted at the platform's own notion of a drive root.
+    ///
+    /// These tests used to build a `C:\` guard and feed it backslash paths
+    /// unconditionally, which only ever meant anything on Windows: on Unix
+    /// `Path::components` treats `C:\Users\demo` as a single relative
+    /// component, so every case degenerated to `NotAbsolute`. The
+    /// platform-specific cases now live in the `windows` and `unix` modules
+    /// below, and only genuinely portable assertions live out here.
     fn guard() -> PathGuard {
         PathGuard {
-            roots: vec![PathBuf::from("C:\\")],
+            roots: vec![PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" })],
         }
+    }
+
+    /// An absolute path under the guard's root, spelled for this platform.
+    fn under_root(rel: &str) -> PathBuf {
+        let mut p = PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" });
+        p.extend(rel.split('/'));
+        p
     }
 
     #[test]
     fn accepts_normal_absolute_path() {
         let g = guard();
-        assert!(g.sanitize(Path::new("C:\\Users\\demo\\file.txt")).is_ok());
-    }
-
-    #[test]
-    fn rejects_traversal() {
-        let g = guard();
-        assert!(matches!(
-            g.sanitize(Path::new("C:\\..\\..\\secret")),
-            Err(PathGuardError::Traversal)
-        ));
+        assert!(g.sanitize(&under_root("Users/demo/file.txt")).is_ok());
     }
 
     #[test]
     fn normalizes_inner_dotdot() {
         let g = guard();
-        let p = g.sanitize(Path::new("C:\\a\\b\\..\\c")).unwrap();
-        assert_eq!(p, PathBuf::from("C:\\a\\c"));
+        let p = g.sanitize(&under_root("a/b/../c")).unwrap();
+        assert_eq!(p, under_root("a/c"));
     }
 
     #[test]
     fn rejects_device_names() {
         let g = guard();
         assert!(matches!(
-            g.sanitize(Path::new("C:\\folder\\CON.txt")),
+            g.sanitize(&under_root("folder/CON.txt")),
             Err(PathGuardError::ReservedName(_))
         ));
     }
@@ -206,11 +212,11 @@ mod tests {
     fn rejects_console_device_names() {
         let g = guard();
         assert!(matches!(
-            g.sanitize(Path::new("C:\\folder\\CONIN$")),
+            g.sanitize(&under_root("folder/CONIN$")),
             Err(PathGuardError::ReservedName(_))
         ));
         assert!(matches!(
-            g.sanitize(Path::new("C:\\folder\\conout$.txt")),
+            g.sanitize(&under_root("folder/conout$.txt")),
             Err(PathGuardError::ReservedName(_))
         ));
     }
@@ -225,37 +231,142 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_verbatim_disk_prefix() {
-        let g = guard();
-        // What `fs::canonicalize` hands back on Windows must both pass the
-        // root check and come out in plain-disk spelling.
-        let p = g
-            .sanitize(Path::new("\\\\?\\C:\\Users\\demo\\file.txt"))
-            .unwrap();
-        assert_eq!(p, PathBuf::from("C:\\Users\\demo\\file.txt"));
-    }
-
-    #[test]
-    fn rejects_verbatim_unc() {
-        let g = guard();
-        assert!(matches!(
-            g.sanitize(Path::new("\\\\?\\UNC\\server\\share\\x")),
-            Err(PathGuardError::UnauthorizedPrefix)
-        ));
-    }
-
-    #[test]
-    fn rejects_unc() {
-        let g = guard();
-        assert!(matches!(
-            g.sanitize(Path::new("\\\\server\\share\\x")),
-            Err(PathGuardError::UnauthorizedPrefix)
-        ));
-    }
-
-    #[test]
     fn rejects_relative() {
         let g = guard();
-        assert!(g.sanitize(Path::new("relative\\path")).is_err());
+        assert!(matches!(
+            g.sanitize(Path::new("relative/path")),
+            Err(PathGuardError::NotAbsolute)
+        ));
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(matches!(
+            guard().sanitize(Path::new("")),
+            Err(PathGuardError::Empty)
+        ));
+    }
+
+    #[cfg(windows)]
+    mod windows {
+        use super::*;
+
+        #[test]
+        fn rejects_traversal_above_the_drive_root() {
+            let g = guard();
+            assert!(matches!(
+                g.sanitize(Path::new("C:\\..\\..\\secret")),
+                Err(PathGuardError::Traversal)
+            ));
+        }
+
+        #[test]
+        fn normalizes_verbatim_disk_prefix() {
+            let g = guard();
+            // What `fs::canonicalize` hands back on Windows must both pass
+            // the root check and come out in plain-disk spelling.
+            let p = g
+                .sanitize(Path::new("\\\\?\\C:\\Users\\demo\\file.txt"))
+                .unwrap();
+            assert_eq!(p, PathBuf::from("C:\\Users\\demo\\file.txt"));
+        }
+
+        #[test]
+        fn rejects_verbatim_unc() {
+            let g = guard();
+            assert!(matches!(
+                g.sanitize(Path::new("\\\\?\\UNC\\server\\share\\x")),
+                Err(PathGuardError::UnauthorizedPrefix)
+            ));
+        }
+
+        #[test]
+        fn rejects_unc() {
+            let g = guard();
+            assert!(matches!(
+                g.sanitize(Path::new("\\\\server\\share\\x")),
+                Err(PathGuardError::UnauthorizedPrefix)
+            ));
+        }
+
+        #[test]
+        fn rejects_a_path_on_an_unauthorized_drive() {
+            let g = guard();
+            assert!(matches!(
+                g.sanitize(Path::new("D:\\elsewhere\\file.txt")),
+                Err(PathGuardError::OutsideRoots)
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    mod unix {
+        use super::*;
+
+        #[test]
+        fn rejects_traversal_above_the_root() {
+            let g = guard();
+            assert!(matches!(
+                g.sanitize(Path::new("/../../secret")),
+                Err(PathGuardError::Traversal)
+            ));
+        }
+
+        /// `with_system_roots` authorizes `/` on POSIX, which makes
+        /// `OutsideRoots` unreachable there. Containment only becomes
+        /// meaningful against a narrower root — this pins that the check
+        /// itself works, so a per-operation scope can rely on it.
+        #[test]
+        fn containment_is_enforced_against_a_narrow_root() {
+            let g = PathGuard {
+                roots: vec![PathBuf::from("/home/demo")],
+            };
+            assert!(g.sanitize(Path::new("/home/demo/notes/a.txt")).is_ok());
+            assert!(matches!(
+                g.sanitize(Path::new("/etc/shadow")),
+                Err(PathGuardError::OutsideRoots)
+            ));
+            // A sibling that merely shares a textual prefix is not inside.
+            assert!(matches!(
+                g.sanitize(Path::new("/home/demo-other/a.txt")),
+                Err(PathGuardError::OutsideRoots)
+            ));
+        }
+
+        /// `..` may normalize away inside the path but must never be able to
+        /// climb out of the authorized root.
+        #[test]
+        fn dotdot_cannot_escape_a_narrow_root() {
+            let g = PathGuard {
+                roots: vec![PathBuf::from("/home/demo")],
+            };
+            assert_eq!(
+                g.sanitize(Path::new("/home/demo/a/../b")).unwrap(),
+                PathBuf::from("/home/demo/b")
+            );
+            assert!(matches!(
+                g.sanitize(Path::new("/home/demo/../../etc/shadow")),
+                Err(PathGuardError::OutsideRoots)
+            ));
+        }
+
+        #[test]
+        fn system_roots_authorize_everything_absolute() {
+            // Documents today's POSIX posture explicitly: the root is `/`, so
+            // the guard's value here is normalization and traversal
+            // rejection, not containment.
+            let g = PathGuard::with_system_roots();
+            assert_eq!(g.roots(), [PathBuf::from("/")]);
+            assert!(g.sanitize(Path::new("/etc/hosts")).is_ok());
+        }
+
+        #[test]
+        fn rejects_null_bytes() {
+            let g = guard();
+            assert!(matches!(
+                g.sanitize(Path::new("/home/demo/a\0b")),
+                Err(PathGuardError::NullByte)
+            ));
+        }
     }
 }

@@ -35,6 +35,7 @@ impl LocalProvider {
     /// (zip central directories, audio tag readers). Refuses symlinks and
     /// directories; callers must keep their own read caps.
     pub fn open_read(&self, path: &Path) -> anyhow::Result<(fs::File, u64)> {
+        crate::app::diagnostics::assert_not_rendering("storage::open_read");
         let path = self.guard.sanitize(path)?;
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("reading metadata of {}", path.display()))?;
@@ -55,6 +56,7 @@ impl StorageProvider for LocalProvider {
     }
 
     fn list(&self, dir: &Path) -> anyhow::Result<Vec<FsEntry>> {
+        crate::app::diagnostics::assert_not_rendering("storage::list");
         let dir = self.guard.sanitize(dir)?;
         let mut entries = Vec::new();
         for item in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
@@ -70,6 +72,7 @@ impl StorageProvider for LocalProvider {
     }
 
     fn stat(&self, path: &Path) -> anyhow::Result<FsEntry> {
+        crate::app::diagnostics::assert_not_rendering("storage::stat");
         let path = self.guard.sanitize(path)?;
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("reading metadata of {}", path.display()))?;
@@ -77,6 +80,7 @@ impl StorageProvider for LocalProvider {
     }
 
     fn create_dir(&self, path: &Path) -> anyhow::Result<()> {
+        crate::app::diagnostics::assert_not_rendering("storage::create_dir");
         let path = self.guard.sanitize(path)?;
         // No `exists()` pre-check: `create_dir` itself fails atomically when
         // the target exists, so there is no TOCTOU window to race.
@@ -103,6 +107,7 @@ impl StorageProvider for LocalProvider {
     }
 
     fn create_file(&self, path: &Path) -> anyhow::Result<()> {
+        crate::app::diagnostics::assert_not_rendering("storage::create_file");
         let path = self.guard.sanitize(path)?;
         // `create_new` makes the existence check atomic — no TOCTOU window.
         let result = fs::OpenOptions::new()
@@ -127,6 +132,7 @@ impl StorageProvider for LocalProvider {
     }
 
     fn rename(&self, from: &Path, to: &Path) -> anyhow::Result<()> {
+        crate::app::diagnostics::assert_not_rendering("storage::rename");
         let from = self.guard.sanitize(from)?;
         let to = self.guard.sanitize(to)?;
         // No `exists()` pre-check: Windows MoveFileEx (without
@@ -154,6 +160,7 @@ impl StorageProvider for LocalProvider {
     }
 
     fn read_head(&self, path: &Path, max: usize) -> anyhow::Result<(Vec<u8>, u64)> {
+        crate::app::diagnostics::assert_not_rendering("storage::read_head");
         let (file, total) = self.open_read(path)?;
         let mut bytes = Vec::with_capacity(max.min(total as usize));
         file.take(max as u64)
@@ -200,6 +207,7 @@ impl StorageProvider for LocalProvider {
     }
 
     fn delete_to_trash(&self, paths: &[PathBuf]) -> anyhow::Result<()> {
+        crate::app::diagnostics::assert_not_rendering("storage::delete_to_trash");
         let mut sanitized = Vec::with_capacity(paths.len());
         for path in paths {
             sanitized.push(self.guard.sanitize(path)?);
@@ -223,6 +231,7 @@ impl StorageProvider for LocalProvider {
     }
 
     fn remove_after_move(&self, path: &Path) -> anyhow::Result<()> {
+        crate::app::diagnostics::assert_not_rendering("storage::remove_after_move");
         let path = self.guard.sanitize(path)?;
         let metadata = fs::symlink_metadata(&path)?;
         let result = if metadata.is_dir() {

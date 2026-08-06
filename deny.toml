@@ -40,5 +40,7 @@ allow-git = [
     "https://github.com/zed-industries/font-kit",
     "https://github.com/zed-industries/reqwest",
     "https://github.com/zed-industries/scap",
+    # X Input Method support, reached only through gpui_linux's `x11` feature.
+    "https://github.com/zed-industries/xim-rs",
     "https://github.com/longbridge/gpui-component",
 ]

@@ -14,6 +14,8 @@ impl DirWatcher {
     /// Watch a directory; each relevant filesystem event pushes one unit onto
     /// the returned channel.
     pub fn watch(dir: &Path) -> anyhow::Result<(Self, UnboundedReceiver<()>)> {
+        crate::app::diagnostics::assert_not_rendering("watcher::watch");
+        tracing::debug!(target: "piku::watch", dir = %dir.display(), "registering watcher");
         let (tx, rx) = unbounded::<()>();
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {

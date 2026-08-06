@@ -16,6 +16,7 @@ pub struct DriveInfo {
 }
 
 pub fn list_drives() -> Vec<DriveInfo> {
+    crate::app::diagnostics::assert_not_rendering("fs_service::list_drives");
     let disks = Disks::new_with_refreshed_list();
     let mut drives: Vec<DriveInfo> = disks
         .iter()
@@ -61,6 +62,7 @@ pub struct Place {
 }
 
 pub fn known_places() -> Vec<Place> {
+    crate::app::diagnostics::assert_not_rendering("fs_service::known_places");
     let mut places = Vec::new();
     let mut push = |kind, name: &'static str, path: Option<PathBuf>| {
         if let Some(path) = path

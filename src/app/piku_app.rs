@@ -11,12 +11,34 @@ pub fn run() {
     let app = gpui_platform::application().with_assets(PikuAssets);
 
     app.run(move |cx| {
+        // Everything inside this closure, and every gpui callback it installs,
+        // runs on this thread. Recording it lets the diagnostics layer tell
+        // "blocking on the UI thread" from "blocking on a worker".
+        crate::app::diagnostics::mark_ui_thread();
+
         gpui_component::init(cx);
         crate::theme::apply(cx);
         crate::app::actions::init(cx);
-        PikuState::init(cx);
+        if !PikuState::init(cx) {
+            // Without a backend there is no way to reach the filesystem, and a
+            // file manager that cannot do that should say so and stop rather
+            // than open an empty window.
+            tracing::error!("backend failed to start; exiting");
+            cx.quit();
+            return;
+        }
         crate::ui::register_panels(cx);
         cx.activate(true);
+
+        // Drain outstanding backend work before the process goes away, so an
+        // in-flight copy is cancelled rather than torn down mid-write.
+        cx.on_app_quit(|cx| {
+            let backend = PikuState::global(cx).backend().clone();
+            async move {
+                backend.shutdown();
+            }
+        })
+        .detach();
 
         let mut window_size = size(px(1440.), px(900.));
         if let Some(display) = cx.primary_display() {
@@ -35,23 +57,33 @@ pub fn run() {
                 ..Default::default()
             };
 
-            let window = cx
-                .open_window(options, |window, cx| {
-                    let workspace = cx.new(|cx| Workspace::new(window, cx));
-                    cx.new(|cx| Root::new(workspace, window, cx))
-                })
-                .expect("failed to open the PIKU window");
+            // A window we cannot open (or cannot talk to) is unrecoverable, but
+            // it is not a bug to panic over: log it and shut down cleanly so
+            // the platform layer gets to run its teardown.
+            let window = match cx.open_window(options, |window, cx| {
+                let workspace = cx.new(|cx| Workspace::new(window, cx));
+                cx.new(|cx| Root::new(workspace, window, cx))
+            }) {
+                Ok(window) => window,
+                Err(error) => {
+                    tracing::error!(%error, "failed to open the PIKU window");
+                    cx.update(|cx| cx.quit());
+                    return;
+                }
+            };
 
-            window
-                .update(cx, |_, window, cx| {
-                    window.activate_window();
-                    window.set_window_title("PIKU");
-                    cx.on_release(|_, cx| {
-                        cx.quit();
-                    })
-                    .detach();
+            let updated = window.update(cx, |_, window, cx| {
+                window.activate_window();
+                window.set_window_title("PIKU");
+                cx.on_release(|_, cx| {
+                    cx.quit();
                 })
-                .expect("failed to update window");
+                .detach();
+            });
+            if let Err(error) = updated {
+                tracing::error!(%error, "failed to initialize the PIKU window");
+                cx.update(|cx| cx.quit());
+            }
         })
         .detach();
     });

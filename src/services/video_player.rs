@@ -392,18 +392,23 @@ fn decode_loop(
                     pts_ms,
                     image: render_image_from_rgba(rgba),
                 });
-                // Backpressure: hold the frame until the queue drains below cap.
-                while pending.is_some() {
+                // Backpressure: hold the frame until the queue drains below
+                // cap. The lock is released before the sleep — the assignment
+                // ends the statement the guard's temporary belongs to.
+                while let Some(frame) = pending.take() {
                     if superseded(&shared) {
                         break;
                     }
-                    if let Ok(mut q) = shared.frames.lock()
-                        && q.len() < FRAME_QUEUE_CAP
-                    {
-                        q.push_back(pending.take().expect("pending is Some in this branch"));
-                        break;
+                    pending = match shared.frames.lock() {
+                        Ok(mut q) if q.len() < FRAME_QUEUE_CAP => {
+                            q.push_back(frame);
+                            None
+                        }
+                        _ => Some(frame),
+                    };
+                    if pending.is_some() {
+                        std::thread::sleep(Duration::from_millis(5));
                     }
-                    std::thread::sleep(Duration::from_millis(5));
                 }
             }
             FfmpegEvent::Done | FfmpegEvent::LogEOF => break,

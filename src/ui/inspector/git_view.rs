@@ -3,7 +3,7 @@
 //! and per-file history when a single file is selected. Read paths only —
 //! every string shown here was sanitized at the backend boundary.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -918,7 +918,7 @@ pub(super) fn render_git(
 /// diff against the commit's parent.
 fn commit_row(
     this: &mut InspectorPanel,
-    root: &PathBuf,
+    root: &Path,
     commit: &CommitInfo,
     file_rel: Option<PathBuf>,
     now: SystemTime,
@@ -927,7 +927,7 @@ fn commit_row(
     let compact = file_rel.is_some();
     let expanded = !compact && this.git.expanded.as_deref() == Some(commit.id.as_str());
     let id_for_click = commit.id.clone();
-    let root_for_click = root.clone();
+    let root_for_click = root.to_path_buf();
 
     let mut meta = format!(
         "{} · {} · {}",
@@ -1008,7 +1008,7 @@ fn commit_row(
                 // Clicking a changed file shows its diff against the parent
                 // commit; stop propagation so the commit row doesn't collapse.
                 let commit_for_diff = commit.id.clone();
-                let root_for_diff = root.clone();
+                let root_for_diff = root.to_path_buf();
                 let rel_for_diff = PathBuf::from(&change.rel_path);
                 let key = format!("commit:{}:{}", commit.id, change.rel_path);
                 row = row.child(

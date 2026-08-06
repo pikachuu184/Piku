@@ -18,7 +18,8 @@ use gpui_component::{
 
 use crate::app::actions::{RemoveRecentPath, ToggleFavoritePath, TogglePinnedPath};
 use crate::app::assets::PikuIcon;
-use crate::services::fs_service::{self, DriveInfo, Place};
+use crate::backend::dispatch::BackendExt as _;
+use crate::services::fs_service::{DriveInfo, Place};
 use crate::state::PikuState;
 use crate::ui::components::skeleton_rows;
 use crate::ui::explorer::navigate_active;
@@ -48,7 +49,7 @@ pub struct NavPanel {
 impl NavPanel {
     pub const PANEL_NAME: &'static str = "PikuNav";
 
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (nav, workspaces, drive_stats) = {
             let state = PikuState::global(cx);
             (
@@ -63,29 +64,25 @@ impl NavPanel {
         // Repaint drive bars as scan results stream in.
         let drive_stats_sub = cx.observe(&drive_stats, |_, _, cx| cx.notify());
 
-        // Drive enumeration touches the disk subsystem — keep it off the
-        // render thread.
-        cx.spawn_in(window, async move |this, cx| {
-            let drives = cx
-                .background_executor()
-                .spawn(async move { fs_service::list_drives() })
-                .await;
-            let _ = this.update(cx, |this: &mut NavPanel, cx| {
+        // Drive enumeration refreshes the whole mount table — dispatched to
+        // the backend, which also caches it so repeated sidebar rebuilds are
+        // free.
+        cx.backend_task(
+            |backend| backend.drive().drives(),
+            |this: &mut NavPanel, drives, cx| {
                 this.drives = drives;
                 this.drives_loaded = true;
                 // Drives are known — refresh any stale per-category usage
                 // stats in the background (silent, cached, sequential).
                 let mounts: Vec<PathBuf> = this.drives.iter().map(|d| d.mount.clone()).collect();
-                PikuState::global(cx)
-                    .drive_stats
-                    .clone()
-                    .update(cx, |store, cx| {
-                        store.ensure_scans(mounts, cx);
-                    });
-                cx.notify();
-            });
-        })
-        .detach();
+                // Bind before `update`: the global borrow must end before `cx`
+                // can be taken mutably.
+                let drive_stats = PikuState::global(cx).drive_stats.clone();
+                drive_stats.update(cx, |store, cx| {
+                    store.ensure_scans(mounts, cx);
+                });
+            },
+        );
 
         // Register so the shell can start inline workspace edits from the
         // global Create/Rename actions.
@@ -96,16 +93,25 @@ impl NavPanel {
         // Rows re-render (branch badge) whenever repository state changes.
         let git = PikuState::global(cx).git.clone();
         let git_sub = cx.observe(&git, |_, _, cx| cx.notify());
-        let places = fs_service::known_places();
-        git.update(cx, |git, cx| {
-            for place in &places {
-                git.note_dir(place.path.clone(), cx);
-            }
-        });
+
+        // `known_places` probes seven directories for existence. That used to
+        // run right here, on the render thread, during every layout restore.
+        cx.backend_task(
+            |backend| backend.drive().places(),
+            |this: &mut NavPanel, places, cx| {
+                let git = PikuState::global(cx).git.clone();
+                git.update(cx, |git, cx| {
+                    for place in &places {
+                        git.note_dir(place.path.clone(), cx);
+                    }
+                });
+                this.places = places;
+            },
+        );
 
         Self {
             focus_handle: cx.focus_handle(),
-            places,
+            places: Vec::new(),
             drives: Vec::new(),
             drives_loaded: false,
             ws_edit: None,

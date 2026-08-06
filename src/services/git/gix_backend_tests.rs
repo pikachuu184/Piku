@@ -70,7 +70,7 @@ fn commit_files(
             "HEAD",
             msg,
             tree_id,
-            parent.into_iter(),
+            parent,
         )
         .unwrap()
         .detach();

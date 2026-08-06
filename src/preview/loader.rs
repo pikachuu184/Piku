@@ -221,12 +221,11 @@ fn load_audio_meta(path: &Path) -> PreviewContent {
         // rodio/symphonia can't decode every format lofty can still tag (some
         // WMA/AAC). When it yields nothing, fall back to the bundled ffmpeg,
         // which decodes far more — so the waveform still displays.
-        if peaks.iter().all(|p| *p <= 0.0) {
-            if let Some(fallback) =
+        if peaks.iter().all(|p| *p <= 0.0)
+            && let Some(fallback) =
                 crate::services::video_probe::audio_pcm_peaks(path, WAVEFORM_BUCKETS)
-            {
-                peaks = fallback;
-            }
+        {
+            peaks = fallback;
         }
         peaks
     } else {

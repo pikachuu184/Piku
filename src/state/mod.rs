@@ -39,6 +39,9 @@ pub struct FileClipboard {
 }
 
 pub struct PikuState {
+    /// The asynchronous filesystem backend. Every view reaches the operating
+    /// system through this and nothing else.
+    backend: crate::backend::Backend,
     pub settings: Entity<Settings>,
     pub workspaces: Entity<WorkspaceStore>,
     pub nav: Entity<NavModel>,
@@ -61,7 +64,18 @@ pub struct PikuState {
 impl Global for PikuState {}
 
 impl PikuState {
-    pub fn init(cx: &mut App) {
+    /// Build the global state. Returns `false` if the backend could not start,
+    /// in which case the caller should abort startup rather than run an app
+    /// that cannot reach the filesystem.
+    pub fn init(cx: &mut App) -> bool {
+        let Some(backend) = crate::backend::Backend::new() else {
+            return false;
+        };
+        Self::init_with(cx, backend);
+        true
+    }
+
+    fn init_with(cx: &mut App, backend: crate::backend::Backend) {
         let settings = cx.new(|_| Settings::load());
         let store = WorkspaceStore::load_or_migrate();
         let active_id = store.active_id().to_string();
@@ -76,6 +90,7 @@ impl PikuState {
         let audio = cx.new(|_| AudioPlayer::new());
         let git = cx.new(|_| GitStore::new());
         cx.set_global(Self {
+            backend,
             settings,
             workspaces,
             nav,
@@ -94,6 +109,11 @@ impl PikuState {
 
     pub fn global(cx: &App) -> &Self {
         cx.global::<Self>()
+    }
+
+    /// The asynchronous filesystem backend.
+    pub fn backend(&self) -> &crate::backend::Backend {
+        &self.backend
     }
 
     pub fn set_active_explorer(&self, panel: WeakEntity<ExplorerPanel>) {

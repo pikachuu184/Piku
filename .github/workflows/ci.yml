@@ -6,20 +6,71 @@ on:
   pull_request:
 
 jobs:
-  check:
-    runs-on: windows-latest
+  # Formatting and the source-level invariants that need no toolchain build.
+  # Kept first and cheap so an obvious miss fails in under a minute.
+  lint:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # --- Architectural invariants, enforced by grep ---------------------
+      # Each guards a rule the compiler cannot see inside a single crate.
+      # `if grep ...; then fail; fi` is the form to use here: it keeps a
+      # no-match exit (grep's 1) from tripping the runner's `bash -e`, and it
+      # makes the failing branch explicit.
+      - name: Architectural invariants
+        run: bash ci/invariants.sh
+
+  # The code is Windows-first (drive-letter roots, the reserved-device-name
+  # table, CREATE_NO_WINDOW). Building and testing on all three catches the
+  # platform assumptions that a Windows-only matrix silently accepted — the
+  # path-guard tests were Windows-only for exactly this reason.
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Linux GPUI runtime dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libxcb1-dev
       # --locked everywhere: the committed Cargo.lock IS the supply-chain
       # pin for the zed git dependencies (see Cargo.toml).
       - name: Build
         run: cargo build --locked
       - name: Test
         run: cargo test --locked
+      # --all-targets so test code is linted too; it was previously exempt.
       - name: Clippy
-        run: cargo clippy --locked -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  # The oldest toolchain the crate claims to support (edition 2024).
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libxcb1-dev
+      - name: Build on the MSRV
+        run: cargo build --locked
 
   deny:
     runs-on: ubuntu-latest

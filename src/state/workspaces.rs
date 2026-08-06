@@ -35,6 +35,13 @@ struct WorkspaceIndex {
 
 pub struct WorkspaceStore {
     index: WorkspaceIndex,
+    /// Returned by [`WorkspaceStore::active`] if the index is ever empty.
+    ///
+    /// `load_or_migrate` seeds a "Default" workspace and `delete` refuses to
+    /// remove the last one, so this is unreachable in practice — but `active`
+    /// hands out a `&WorkspaceMeta` and a corrupt state file must degrade to a
+    /// usable app, not a panic on startup.
+    fallback: WorkspaceMeta,
 }
 
 impl WorkspaceStore {
@@ -84,7 +91,10 @@ impl WorkspaceStore {
             index.active_id = index.workspaces.first().map(|w| w.id.clone());
         }
 
-        let store = Self { index };
+        let store = Self {
+            fallback: new_meta("Default"),
+            index,
+        };
         store.save();
         store
     }
@@ -100,7 +110,10 @@ impl WorkspaceStore {
             .iter()
             .find(|w| w.id == id)
             .or_else(|| self.index.workspaces.first())
-            .expect("workspace index is never empty after load_or_migrate")
+            .unwrap_or_else(|| {
+                tracing::error!("workspace index is empty — falling back to a synthetic workspace");
+                &self.fallback
+            })
     }
 
     pub fn active_id(&self) -> &str {
@@ -263,6 +276,7 @@ mod tests {
             .collect::<Vec<_>>();
         let active_id = workspaces.first().map(|w| w.id.clone());
         WorkspaceStore {
+            fallback: new_meta("Default"),
             index: WorkspaceIndex {
                 workspaces,
                 active_id,

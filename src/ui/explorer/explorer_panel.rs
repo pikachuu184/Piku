@@ -52,12 +52,14 @@ pub(super) struct InlineEdit {
 }
 
 /// The payload carried while dragging files. A plain `'static` value (gpui's
-/// drag/drop is type-keyed on it); the preview view is built separately. The
-/// source tab id lets a drop target recognize a same-tab no-op.
+/// drag/drop is type-keyed on it); the preview view is built separately.
+///
+/// There is deliberately no source-tab id: `drop_into` recognizes a no-op by
+/// comparing each dragged path's parent against the destination, which covers
+/// same-tab drops and same-directory drops in a split alike.
 #[derive(Clone)]
 pub(super) struct DraggedPaths {
     pub(super) paths: Vec<PathBuf>,
-    pub(super) source_id: String,
 }
 
 /// The little chip shown under the cursor while dragging files.
@@ -102,6 +104,14 @@ pub struct ExplorerPanel {
     pub(super) error: Option<String>,
     generation: u64,
     watcher: Option<DirWatcher>,
+    /// The directory `watcher` is registered on. A reload triggered by a
+    /// filesystem event must not tear the watcher down and build a new one —
+    /// registration is a blocking syscall, and in a busy directory that ran
+    /// once per event.
+    watched: Option<PathBuf>,
+    /// Bumped only when the watcher is actually re-registered, so the drain
+    /// task's staleness check is independent of the listing generation.
+    watch_gen: u64,
     pub(super) scroll: VirtualListScrollHandle,
     pub(super) tab_panel: Option<WeakEntity<TabPanel>>,
     /// True while showing recursive-search results instead of the folder
@@ -219,6 +229,8 @@ impl ExplorerPanel {
             error: None,
             generation: 0,
             watcher: None,
+            watched: None,
+            watch_gen: 0,
             scroll: VirtualListScrollHandle::new(),
             tab_panel: None,
             searching: false,
@@ -237,10 +249,6 @@ impl ExplorerPanel {
             this.run_search(cx);
         }
         this
-    }
-
-    pub fn cwd(&self) -> &PathBuf {
-        &self.session.cwd
     }
 
     pub fn tab_panel(&self) -> Option<WeakEntity<TabPanel>> {
@@ -464,13 +472,28 @@ impl ExplorerPanel {
 
     // -- Watching ----------------------------------------------------------
 
+    /// Ensure a watcher is registered on the current directory.
+    ///
+    /// Called after every load, including the reloads that watcher events
+    /// themselves trigger — so it must be idempotent. Re-registering on each
+    /// event meant a blocking `inotify_add_watch` (and a fresh drain task) for
+    /// every file touched in the folder; in a home directory that fired about
+    /// once a second at rest.
     fn start_watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.watcher.is_some() && self.watched.as_deref() == Some(self.session.cwd.as_path()) {
+            return;
+        }
+
         self.watcher = None;
+        self.watched = None;
+        self.watch_gen = self.watch_gen.wrapping_add(1);
+        let watch_gen = self.watch_gen;
+
         let Ok((watcher, mut rx)) = DirWatcher::watch(&self.session.cwd) else {
             return;
         };
         self.watcher = Some(watcher);
-        let generation = self.generation;
+        self.watched = Some(self.session.cwd.clone());
 
         cx.spawn_in(window, async move |this, cx| {
             while rx.next().await.is_some() {
@@ -480,9 +503,11 @@ impl ExplorerPanel {
                     .await;
                 while rx.try_recv().is_ok() {}
 
+                // Stale only once a *different* directory has been watched —
+                // not merely because the listing reloaded.
                 let stale = this
                     .update_in(cx, |this, window, cx| {
-                        if this.generation != generation {
+                        if this.watch_gen != watch_gen {
                             true
                         } else {
                             this.reload(window, cx);
@@ -581,8 +606,11 @@ impl ExplorerPanel {
                                 cx.notify();
                                 false
                             }
-                            SearchUpdate::Done { .. } => {
-                                this.search_complete = true;
+                            // `complete` is false when the walk hit one of its
+                            // caps (depth, visited dirs, hits) and stopped
+                            // early — the results are a prefix, not the answer.
+                            SearchUpdate::Done { complete } => {
+                                this.search_complete = complete;
                                 cx.notify();
                                 true
                             }
@@ -1063,15 +1091,6 @@ impl ExplorerPanel {
 
     // -- Tab identity ------------------------------------------------------
 
-    /// This tab's stable id (used as the drag source and by Duplicate Tab).
-    pub fn session_id(&self) -> String {
-        self.session.id.clone()
-    }
-
-    pub fn is_pinned(&self) -> bool {
-        self.session.pinned
-    }
-
     /// The tab label: the user's title override, else the folder name.
     pub(super) fn tab_title(&self) -> SharedString {
         match &self.session.title {
@@ -1189,6 +1208,10 @@ impl ExplorerPanel {
 
 impl Render for ExplorerPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Times the pass under `PIKU_TRACE_SPANS=1`, and in debug builds makes
+        // any blocking call reached from here panic instead of stuttering.
+        let _pass = crate::app::diagnostics::enter_render("ExplorerPanel");
+
         let content = if let Some(error) = self.error.clone() {
             empty_state(
                 Icon::new(IconName::TriangleAlert),
