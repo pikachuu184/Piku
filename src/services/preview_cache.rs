@@ -15,11 +15,14 @@
 //! map with no I/O and no threads.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use crate::preview::content::PreviewContent;
+
+/// The key is defined by the service, not here, and the service echoes back the
+/// one it actually read under. That is what lets the media panel probe the cache
+/// without stat-ing on the UI thread the way it used to.
+pub use crate::backend::services::preview::PreviewKey;
 
 /// Most decoded previews kept resident regardless of size.
 const CACHE_CAP: usize = 24;
@@ -34,39 +37,6 @@ const BYTE_BUDGET: usize = 96 * 1024 * 1024;
 /// images vary, but a conservative constant keeps the cache honestly bounded
 /// without depending on any RenderImage internals.
 const IMAGE_BYTES_EST: usize = 8 * 1024 * 1024;
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct PreviewKey {
-    path: PathBuf,
-    /// Whole seconds since the epoch, `0` when unknown — an edited file gets a
-    /// new key and is re-decoded rather than served from a stale entry.
-    mtime: u64,
-    size: u64,
-}
-
-impl PreviewKey {
-    /// Build a key from an already-known modification time and size (the
-    /// inspector path, which has an `FsEntry`).
-    pub fn new(path: PathBuf, modified: Option<std::time::SystemTime>, size: u64) -> Self {
-        let mtime = modified
-            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        Self { path, mtime, size }
-    }
-
-    /// Build a key by stat-ing the file (the media-panel path, which only has a
-    /// bare path). Returns `None` when the file cannot be stat-ed, so the caller
-    /// simply decodes without caching rather than keying on bad metadata.
-    pub fn for_path(path: &Path) -> Option<Self> {
-        let meta = std::fs::metadata(path).ok()?;
-        Some(Self::new(
-            path.to_path_buf(),
-            meta.modified().ok(),
-            meta.len(),
-        ))
-    }
-}
 
 #[derive(Default)]
 pub struct PreviewCache {
@@ -161,11 +131,13 @@ mod tests {
     }
 
     fn key(name: &str, mtime: u64) -> PreviewKey {
-        PreviewKey {
-            path: PathBuf::from(name),
-            mtime,
-            size: 1,
-        }
+        // Built through the constructor rather than a struct literal: the key's
+        // fields belong to the service, so only it decides what identity means.
+        PreviewKey::new(
+            std::path::PathBuf::from(name),
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime)),
+            1,
+        )
     }
 
     #[test]

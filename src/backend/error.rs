@@ -138,6 +138,15 @@ impl From<crate::backend::protocol::Cancelled> for PreviewError {
     }
 }
 
+impl PreviewError {
+    /// Whether this means "superseded" rather than "went wrong". A cancelled
+    /// preview must leave the panel's loading state to the newer request that
+    /// replaced it, and must never raise a toast.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled | Self::File(FileError::Cancelled))
+    }
+}
+
 /// Drive and mount discovery failures.
 #[derive(Debug, thiserror::Error)]
 pub enum DriveError {

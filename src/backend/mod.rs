@@ -27,12 +27,15 @@ pub mod services;
 
 use std::sync::Arc;
 
+use crate::backend::path::PathPolicy;
 use crate::backend::runtime::BackendRuntime;
 use crate::backend::services::drive::DriveService;
+use crate::backend::services::preview::PreviewService;
 
 struct BackendInner {
     rt: &'static BackendRuntime,
     drive: DriveService,
+    preview: PreviewService,
 }
 
 /// Cheap-to-clone handle to every backend service.
@@ -52,11 +55,18 @@ impl Backend {
         Some(Self(Arc::new(BackendInner {
             rt,
             drive: DriveService::new(rt),
+            // One policy, built once: `with_system_roots` probes drive letters
+            // on Windows, which is not something to redo per request.
+            preview: PreviewService::new(rt, PathPolicy::with_system_roots()),
         })))
     }
 
     pub fn drive(&self) -> &DriveService {
         &self.0.drive
+    }
+
+    pub fn preview(&self) -> &PreviewService {
+        &self.0.preview
     }
 
     // `allow`, not `expect`: used by the tests below but not yet by the

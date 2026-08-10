@@ -65,7 +65,6 @@ pub trait BackendExt<V: 'static> {
     /// `apply` still runs exactly once, including for the cancelled request —
     /// so check `BackendError::is_cancelled()` before raising a toast.
     #[must_use = "dropping the Inflight immediately cancels the request"]
-    #[expect(dead_code, reason = "wired up by the inspector in Stage 7")]
     fn backend_task_cancellable<T: Send + 'static>(
         &mut self,
         make: impl FnOnce(&Backend) -> BackendTask<T>,

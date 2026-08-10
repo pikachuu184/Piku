@@ -17,6 +17,7 @@ pub mod language;
 pub mod probe;
 pub mod providers;
 pub mod read;
+pub mod service;
 pub mod sniff;
 
 use std::path::Path;
@@ -25,6 +26,8 @@ use crate::backend::error::PreviewError;
 use crate::backend::protocol::Cancel;
 use crate::core::entry::{EntryKind, FsEntry};
 use content::PreviewPayload;
+
+pub use service::{PreviewKey, PreviewRequest, PreviewService};
 
 /// Hard caps every provider honours. Previews show a file's head, not the
 /// whole file — the caps keep a multi-GB selection O(small).
