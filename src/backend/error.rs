@@ -11,10 +11,12 @@
 //!    [`BackendError::is_cancelled`] replaces that with something the compiler
 //!    checks.
 
-// This module is the shared vocabulary for services that land over
-// Stages 2-5, so parts of it are legitimately unused right now.
-// `expect` rather than `allow`: once every variant is raised, this attribute itself
-// starts erroring, which is the reminder to delete it.
+// PreviewError and the variants it composes are raised as of Stage 7. The rest
+// — DirectoryError, MetadataError, and the mutating arms of FileError and
+// PathError — belong to services that have not landed.
+//
+// `expect` rather than `allow`: once every variant is raised, this attribute
+// itself starts erroring, which is the reminder to delete it.
 #![expect(dead_code)]
 
 use std::io;

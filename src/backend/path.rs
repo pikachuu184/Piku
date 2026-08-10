@@ -31,6 +31,13 @@
 // type is exercised only by its own tests. `expect` rather than `allow`:
 // it starts erroring once every item is live, which is the reminder to
 // delete it.
+// Stage 7 uses `PathPolicy::validate` and `ValidatedPath::as_path`. The rest is
+// vocabulary for services that mutate: `resolve`/`resolve_for_create`/
+// `reauthorize` for operations that write, `FileName` for create and rename,
+// and `ScopePolicy` for archive extraction — the Zip Slip gate, tested but with
+// nothing to guard until extraction exists.
+//
+// `expect` rather than `allow`: it starts erroring once everything is used.
 #![expect(dead_code)]
 
 use std::ffi::OsStr;

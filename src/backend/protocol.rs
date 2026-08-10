@@ -10,10 +10,14 @@
 //! hand-rolled `Arc<AtomicBool>` flags and four `generation: u64` counters in
 //! the current UI collapse into holding (or not holding) an [`Inflight`].
 
-// This module is the shared vocabulary for services that land over
-// Stages 2-5, so parts of it are legitimately unused right now.
-// `expect` rather than `allow`: once every shape is constructed, this attribute itself
-// starts erroring, which is the reminder to delete it.
+// Stage 7 consumed most of this: BackendTask, BackendStream, Inflight, Cancel,
+// StreamItem, both sinks and both channel constructors are live. What remains
+// is waiting on specific work — `Progress` and `StreamItem::Progress` for the
+// transfer engine, `send`/`finish_async` for a producer that is async rather
+// than blocking.
+//
+// `expect` rather than `allow`: once the last item is constructed, this
+// attribute itself starts erroring, which is the reminder to delete it.
 #![expect(dead_code)]
 
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -24,6 +24,7 @@
 - [ ] `cargo clippy` reports no new warnings
 - [ ] `cargo test` passes
 - [ ] `cargo fmt` has been run
-- [ ] Preview parsers keep their input untrusted (no `unwrap`/`expect`/`panic` in `src/preview/loader.rs`, size caps respected)
+- [ ] `bash ci/invariants.sh` passes (the four architectural gates)
+- [ ] Preview providers keep their input untrusted (no `unwrap`/`expect`/`panic` in `src/backend/services/preview/`, size caps respected, cancellation checked in long loops)
 - [ ] UI changes follow the monochrome theme (only `cx.theme().*` tokens, `cx.theme().radius`, no new hues or shadows)
 - [ ] Documentation and comments updated where relevant
