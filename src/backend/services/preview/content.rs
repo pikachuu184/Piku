@@ -78,12 +78,7 @@ impl std::fmt::Debug for RawImage {
 /// cached. `TooLarge` is not a failure — it is a successful classification
 /// with its own rendering.
 pub enum PreviewPayload {
-    /// Rendered by gpui's native `img()` from the (sanitized) path.
-    Image {
-        path: PathBuf,
-        /// From the image header only — pixel data is never decoded here.
-        dimensions: Option<(u32, u32)>,
-    },
+    Image(ImagePreview),
     Code {
         text: Arc<str>,
         language: Option<&'static str>,
@@ -133,6 +128,27 @@ pub enum PreviewPayload {
     },
     TooLarge {
         size: u64,
+    },
+}
+
+/// How an image preview reaches the screen.
+///
+/// Two arms, because SVG genuinely is different: the renderer draws it
+/// natively at any size, and the `image` crate cannot rasterize it at all.
+/// Everything else goes through the same hardened decode the thumbnails use —
+/// which is the whole point. Applying EXIF orientation to thumbnails only
+/// would leave a portrait photo upright in the grid and sideways in the
+/// inspector, and being *inconsistently* wrong is worse than being uniformly
+/// wrong.
+pub enum ImagePreview {
+    /// Hand the path to the renderer. SVG only.
+    Path { path: PathBuf },
+    /// Decoded here, orientation already applied.
+    Decoded {
+        image: RawImage,
+        /// The **source** dimensions, for the size label — the decoded buffer
+        /// may have been downscaled to fit the viewport.
+        dimensions: (u32, u32),
     },
 }
 

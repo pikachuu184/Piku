@@ -22,12 +22,12 @@ use gpui_component::{
     tree::{TreeItem, TreeState, tree},
     v_flex,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::app::assets::PikuIcon;
 use crate::core::format::format_size;
-use crate::preview::content::{ArchiveItem, HexRow, PreviewContent};
+use crate::preview::content::{ArchiveItem, HexRow, PreviewContent, PreviewImage};
 use crate::ui::inspector::inspector_panel::{CodeSyncKey, InspectorPanel};
 
 /// Archive listings render at most this many rows (the loader already caps
@@ -47,7 +47,7 @@ pub(super) fn render_preview_box(
         return div().into_any_element();
     };
     let element = match &*loaded.content {
-        PreviewContent::Image { path, dimensions } => image_block(panel, path, *dimensions, cx),
+        PreviewContent::Image { source, dimensions } => image_block(panel, source, *dimensions, cx),
         PreviewContent::Code {
             text,
             language,
@@ -467,13 +467,19 @@ fn scalar_label(value: &serde_json::Value) -> String {
 
 fn image_block(
     panel: &mut InspectorPanel,
-    path: &Path,
+    image: &PreviewImage,
     dimensions: Option<(u32, u32)>,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
     let fit = panel.view.image_fit || dimensions.is_none();
     let zoom = panel.view.image_zoom;
-    let path: PathBuf = path.to_path_buf();
+    // A path clone or an `Arc` bump. Never a re-read, and never a re-decode:
+    // for anything but SVG the pixels were decoded on a worker, with the
+    // orientation already applied.
+    let source: ImageSource = match image {
+        PreviewImage::Path(path) => ImageSource::from(path.clone()),
+        PreviewImage::Decoded(frame) => ImageSource::Render(frame.clone()),
+    };
 
     let content: AnyElement = if fit {
         div()
@@ -484,7 +490,7 @@ fn image_block(
             .justify_center()
             .p_1()
             .child(
-                img(path)
+                img(source.clone())
                     .max_w_full()
                     .max_h_full()
                     .object_fit(ObjectFit::Contain),
@@ -501,7 +507,7 @@ fn image_block(
             .overflow_x_scroll()
             .overflow_y_scroll()
             .child(
-                img(path)
+                img(source.clone())
                     .w(px(w as f32 * zoom))
                     .h(px(h as f32 * zoom))
                     .flex_none(),

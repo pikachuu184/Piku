@@ -21,11 +21,16 @@ impl PreviewProvider for Hex {
         ctx.cancel.check()?;
         let (bytes, total) = read::read_head(ctx.path, HEX_CAP)?;
         // Extensionless (or mislabeled) files whose magic bytes are a
-        // renderable image get upgraded to a real image preview.
+        // renderable image get upgraded to a real image preview. Delegated
+        // rather than hand-rolled so the upgrade path gets the same decode
+        // limits and the same EXIF handling as a file that was named honestly.
         if sniff::sniffed_renderable_image(&bytes) {
-            return Ok(PreviewPayload::Image {
-                path: ctx.path.to_path_buf(),
-                dimensions: None,
+            return super::image::Image.load(&LoadCtx {
+                path: ctx.path,
+                // Not "svg": the sniffer only reports raster formats, and an
+                // empty extension must not take the native-render shortcut.
+                ext: "",
+                cancel: ctx.cancel,
             });
         }
         Ok(hex_from(&bytes, total))

@@ -11,19 +11,18 @@
 //! built from an `Arc<str>` (refcount bump), and `RenderImage` takes ownership
 //! of the pixel buffer (a move).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{RenderImage, SharedString};
 
-use crate::backend::services::preview::content::{PreviewPayload, RawImage};
+use crate::backend::services::preview::content::{ImagePreview, PreviewPayload, RawImage};
 use crate::preview::image_util::render_image_from_bgra;
 
 pub enum PreviewContent {
-    /// Rendered by gpui's native `img()` from the (sanitized) path.
     Image {
-        path: PathBuf,
-        /// From the image header only — pixel data is never decoded here.
+        source: PreviewImage,
+        /// The **source** dimensions, for the size label. `None` for SVG,
+        /// which has no pixel size of its own.
         dimensions: Option<(u32, u32)>,
     },
     Code {
@@ -90,6 +89,22 @@ pub enum PreviewContent {
     Error(SharedString),
 }
 
+/// What `img()` should be handed for an image preview.
+///
+/// Deliberately *not* a `gpui::ImageSource`, even though that is what it turns
+/// into one line later: `ImageSource` has a `Custom(Arc<dyn Fn ..>)` variant and
+/// so is neither `Send` nor `Sync`, which would make the whole cached
+/// `Arc<PreviewContent>` non-`Send`. Both arms here are cheap to convert at
+/// render time — a path clone or an `Arc` bump.
+#[derive(Clone)]
+pub enum PreviewImage {
+    /// SVG: the renderer rasterizes it itself, at whatever size it is drawn.
+    Path(std::path::PathBuf),
+    /// Everything else: decoded on a worker, orientation already applied, so
+    /// the renderer never opens the file and cannot disagree about it.
+    Decoded(Arc<RenderImage>),
+}
+
 pub struct ArchiveItem {
     pub name: SharedString,
     pub size: u64,
@@ -124,7 +139,22 @@ impl From<PreviewPayload> for PreviewContent {
     /// rather than fall into a catch-all and silently render as nothing.
     fn from(payload: PreviewPayload) -> Self {
         match payload {
-            PreviewPayload::Image { path, dimensions } => Self::Image { path, dimensions },
+            PreviewPayload::Image(preview) => match preview {
+                ImagePreview::Path { path } => Self::Image {
+                    source: PreviewImage::Path(path),
+                    dimensions: None,
+                },
+                ImagePreview::Decoded {
+                    image: raw,
+                    dimensions,
+                } => Self::Image {
+                    // The frame is already decoded, so the renderer never opens
+                    // the file — which is what makes the orientation applied on
+                    // the worker the one the user actually sees.
+                    source: PreviewImage::Decoded(image(raw)),
+                    dimensions: Some(dimensions),
+                },
+            },
             PreviewPayload::Code {
                 text: body,
                 language,
@@ -220,10 +250,12 @@ mod tests {
     #[test]
     fn every_payload_variant_maps_to_a_content_variant() {
         let cases = [
-            PreviewPayload::Image {
-                path: PathBuf::from("/tmp/a.png"),
-                dimensions: Some((4, 2)),
-            },
+            PreviewPayload::Image(ImagePreview::Decoded {
+                image: RawImage::from_rgba(
+                    image::RgbaImage::from_raw(1, 1, vec![0, 0, 0, 255]).expect("buffer"),
+                ),
+                dimensions: (4, 2),
+            }),
             PreviewPayload::Code {
                 text: "fn main() {}".into(),
                 language: Some("rust"),

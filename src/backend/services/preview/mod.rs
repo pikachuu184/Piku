@@ -46,9 +46,9 @@ pub const ARCHIVE_ENTRY_CAP: usize = 1_000;
 pub const AUDIO_WAVEFORM_MAX_BYTES: u64 = 300 * 1024 * 1024;
 /// Number of bars in the preview waveform / scrubber envelope.
 pub const WAVEFORM_BUCKETS: usize = 240;
-/// Decompression-bomb guard: never hand the renderer an image whose header
-/// claims more pixels than this (width × height).
-pub const IMAGE_MAX_PIXELS: u64 = 100_000_000;
+// The image decode budget lives in `decode.rs`, where the pixel cap is derived
+// from the allocation cap so the two cannot drift apart. The 100 MP constant
+// that used to sit here is what let a header-legal image allocate ~400 MB.
 /// PDF hardening: refuse documents larger than this outright, and never render
 /// more than [`PDF_MAX_PAGES`] pages (pdfium is a C parser on untrusted input).
 pub const PDF_MAX_BYTES: u64 = 256 * 1024 * 1024;

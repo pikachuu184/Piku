@@ -72,6 +72,45 @@ impl std::fmt::Debug for Decoded {
     }
 }
 
+/// Why a decode did not produce an image.
+///
+/// The two arms are kept apart because the inspector renders them
+/// differently: "too large" is a successful classification with its own
+/// message and size, while a malformed file is an error. Collapsing them would
+/// make a corrupt JPEG claim to be enormous.
+#[derive(Debug)]
+pub enum DecodeError {
+    /// Within policy to *look at*, but past the budget to decode. Carries the
+    /// file size so the caller can render the standard "too large" box.
+    TooLarge {
+        size: u64,
+    },
+    Failed(PreviewError),
+}
+
+impl From<PreviewError> for DecodeError {
+    fn from(error: PreviewError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<crate::backend::protocol::Cancelled> for DecodeError {
+    fn from(_: crate::backend::protocol::Cancelled) -> Self {
+        Self::Failed(PreviewError::Cancelled)
+    }
+}
+
+impl From<DecodeError> for PreviewError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::TooLarge { .. } => {
+                PreviewError::Undecodable("image is past the decode budget".into())
+            }
+            DecodeError::Failed(inner) => inner,
+        }
+    }
+}
+
 /// Decode `path` under strict limits, applying EXIF orientation.
 ///
 /// `max_bytes` is a per-caller file-size gate applied before anything is read;
@@ -80,13 +119,16 @@ pub fn decode_bounded(
     path: &std::path::Path,
     max_bytes: u64,
     cancel: &Cancel,
-) -> Result<Decoded, PreviewError> {
+) -> Result<Decoded, DecodeError> {
     cancel.check()?;
     let (mut file, total) = read::open_read(path)?;
-    if total == 0 || total > max_bytes {
-        return Err(PreviewError::Undecodable(
-            "image is too large to decode".into(),
-        ));
+    if total == 0 {
+        return Err(DecodeError::Failed(PreviewError::Undecodable(
+            "the file is empty".into(),
+        )));
+    }
+    if total > max_bytes {
+        return Err(DecodeError::TooLarge { size: total });
     }
 
     // Gate 1, strict and ours: refuse the bomb before a decoder exists.
@@ -96,11 +138,10 @@ pub fn decode_bounded(
         .into_dimensions()
         .map_err(|e| undecodable("reading the image dimensions", &e))?;
     if u64::from(w) * u64::from(h) > MAX_PIXELS || w > MAX_EDGE || h > MAX_EDGE {
-        return Err(PreviewError::Undecodable(
-            format!("image is {w}×{h}, past the decode limit")
-                .as_str()
-                .into(),
-        ));
+        tracing::debug!(
+            target: "piku::preview", width = w, height = h, "refusing an image past the decode limit"
+        );
+        return Err(DecodeError::TooLarge { size: total });
     }
 
     cancel.check()?;
@@ -129,9 +170,7 @@ pub fn decode_bounded(
     // allocation. Catches formats whose pixels are wider than the RGBA the
     // pixel cap above assumed.
     if decoder.total_bytes() > MAX_ALLOC {
-        return Err(PreviewError::Undecodable(
-            "image needs more memory than the decode budget allows".into(),
-        ));
+        return Err(DecodeError::TooLarge { size: total });
     }
 
     let orientation = decoder
@@ -148,6 +187,9 @@ pub fn decode_bounded(
 }
 
 /// Decode and downscale to a `target`-edge thumbnail, ready for the UI.
+///
+/// A thumbnail has no "too large" rendering — the tile simply keeps its glyph —
+/// so both decode failures collapse into one error here.
 pub fn thumbnail(
     path: &std::path::Path,
     target: u32,
@@ -163,8 +205,10 @@ pub fn thumbnail(
     ))
 }
 
-fn undecodable(what: &str, error: &dyn std::fmt::Display) -> PreviewError {
-    PreviewError::Undecodable(format!("{what}: {error}").as_str().into())
+fn undecodable(what: &str, error: &dyn std::fmt::Display) -> DecodeError {
+    DecodeError::Failed(PreviewError::Undecodable(
+        format!("{what}: {error}").as_str().into(),
+    ))
 }
 
 #[cfg(test)]
@@ -270,10 +314,9 @@ mod tests {
 
         let error = decode_bounded(&bomb, u64::MAX, &Cancel::never())
             .expect_err("a 400 MP header must be refused");
-        let text = error.to_string();
         assert!(
-            text.contains("20000×20000"),
-            "the refusal should name the claimed size, got: {text}"
+            matches!(error, DecodeError::TooLarge { .. }),
+            "a bomb must classify as too-large, not as a malformed file: {error:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -389,7 +432,7 @@ mod tests {
         write_png(&file, 64, 64);
         assert!(matches!(
             decode_bounded(&file, u64::MAX, &Cancel::already()),
-            Err(PreviewError::Cancelled)
+            Err(DecodeError::Failed(PreviewError::Cancelled))
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -399,7 +442,10 @@ mod tests {
         let dir = scratch("too-big");
         let file = dir.join("photo.png");
         write_png(&file, 64, 64);
-        assert!(decode_bounded(&file, 8, &Cancel::never()).is_err());
+        assert!(matches!(
+            decode_bounded(&file, 8, &Cancel::never()),
+            Err(DecodeError::TooLarge { .. })
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -408,7 +454,11 @@ mod tests {
         let dir = scratch("garbage");
         let file = dir.join("not-an-image.png");
         let _ = std::fs::write(&file, b"this is definitely not a png");
-        assert!(decode_bounded(&file, u64::MAX, &Cancel::never()).is_err());
+        // Malformed, not oversized — the distinction the inspector renders on.
+        assert!(matches!(
+            decode_bounded(&file, u64::MAX, &Cancel::never()),
+            Err(DecodeError::Failed(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
