@@ -62,7 +62,11 @@ impl Cancel {
     }
 
     /// A handle that never cancels.
-    #[cfg(test)]
+    ///
+    /// For the few callers that genuinely have no request to be superseded by:
+    /// tests, and work initiated outside a `BackendTask` (an explicit
+    /// user-driven screenshot, say). Reaching for this inside a service is a
+    /// smell — it means the request's own token did not get threaded through.
     pub fn never() -> Self {
         Self {
             req: CancellationToken::new(),

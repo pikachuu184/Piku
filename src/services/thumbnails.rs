@@ -15,9 +15,10 @@ use std::time::UNIX_EPOCH;
 
 use gpui::{Context, RenderImage};
 
+use crate::backend::protocol::Cancel;
 use crate::core::entry::FsEntry;
 use crate::core::file_type::{FileCategory, categorize};
-use crate::preview::image_util::render_image_from_rgba;
+use crate::preview::image_util::{render_image_from_bgra, render_image_from_rgba};
 
 /// Which decoder a queued thumbnail needs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,7 +135,12 @@ impl ThumbnailCache {
                         match source {
                             ThumbSource::Image => decode_thumbnail(&path, target),
                             ThumbSource::Video => {
-                                crate::services::video_probe::poster_frame(&path, Some(target))
+                                crate::backend::services::preview::probe::poster_frame(
+                                    &path,
+                                    Some(target),
+                                    &Cancel::never(),
+                                )
+                                .map(render_image_from_bgra)
                             }
                         }
                     })

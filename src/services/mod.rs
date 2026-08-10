@@ -7,5 +7,4 @@ pub mod preview_cache;
 pub mod search;
 pub mod thumbnails;
 pub mod video_player;
-pub mod video_probe;
 pub mod watcher;

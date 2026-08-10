@@ -282,7 +282,11 @@ impl VideoPlayer {
     /// Uses a fresh one-shot ffmpeg grab (decoupled from the display pipeline so
     /// it always works), returning the written path.
     pub fn screenshot(&self) -> Option<PathBuf> {
-        crate::services::video_probe::save_frame_png(&self.path, self.position_ms())
+        crate::backend::services::preview::probe::save_frame_png(
+            &self.path,
+            self.position_ms(),
+            &crate::backend::protocol::Cancel::never(),
+        )
     }
 }
 

@@ -24,7 +24,7 @@ use crate::core::entry::{EntryKind, FsEntry};
 use crate::core::file_type::categorize;
 use crate::core::format::{format_size, format_time};
 use crate::preview::content::PreviewContent;
-use crate::preview::{decide_kind, loader};
+use crate::preview::{decide_kind, load_preview};
 use crate::services::preview_cache::PreviewKey;
 use crate::state::PikuState;
 use crate::ui::components::{category_icon, empty_state};
@@ -178,7 +178,7 @@ impl InspectorPanel {
         self.loading_for = Some(entry.path.clone());
         let task = cx
             .background_executor()
-            .spawn(async move { (loader::load_preview(kind, &path, &ext), path) });
+            .spawn(async move { (load_preview(kind, &path, &ext), path) });
         cx.spawn(async move |this, cx| {
             let (content, path) = task.await;
             let content = Arc::new(content);

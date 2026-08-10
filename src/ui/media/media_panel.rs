@@ -24,7 +24,7 @@ use gpui_component::{
 
 use crate::app::assets::PikuIcon;
 use crate::preview::content::PreviewContent;
-use crate::preview::{PreviewKind, kind_for_path, loader};
+use crate::preview::{PreviewKind, kind_for_path, load_preview};
 use crate::services::preview_cache::PreviewKey;
 use crate::state::PikuState;
 use crate::ui::media::VideoView;
@@ -105,7 +105,7 @@ impl MediaPanel {
             .unwrap_or_default();
         let task = cx
             .background_executor()
-            .spawn(async move { loader::load_preview(kind, &path, &ext) });
+            .spawn(async move { load_preview(kind, &path, &ext) });
         cx.spawn(async move |this, cx| {
             let content = Arc::new(task.await);
             let _ = this.update(cx, |this, cx| {

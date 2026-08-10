@@ -159,16 +159,6 @@ impl StorageProvider for LocalProvider {
         result
     }
 
-    fn read_head(&self, path: &Path, max: usize) -> anyhow::Result<(Vec<u8>, u64)> {
-        crate::app::diagnostics::assert_not_rendering("storage::read_head");
-        let (file, total) = self.open_read(path)?;
-        let mut bytes = Vec::with_capacity(max.min(total as usize));
-        file.take(max as u64)
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("reading {}", path.display()))?;
-        Ok((bytes, total))
-    }
-
     fn copy_file(
         &self,
         from: &Path,
