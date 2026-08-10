@@ -22,6 +22,65 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::error::BackendError;
+use crate::backend::runtime::BackendRuntime;
+
+/// The "stop now" signal, shaped as an error so a worker can write
+/// `cancel.check()?` at a loop head.
+///
+/// Each service's error enum converts from this, which is what keeps the
+/// cancellation path a compiler-checked variant rather than a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled;
+
+/// The consumer-side cancellation state a worker observes.
+///
+/// Two tokens, because a worker must stop for two independent reasons: its
+/// request was superseded, or the whole runtime is draining. Bundling them
+/// means a provider takes one parameter and cannot forget the second reason.
+///
+/// Providers take `&Cancel` rather than a sink so they stay independent of
+/// which response shape ([`BackendTask`] or [`BackendStream`]) called them,
+/// and so a test can construct one without starting a runtime.
+#[derive(Clone, Debug)]
+pub struct Cancel {
+    req: CancellationToken,
+    shutdown: CancellationToken,
+}
+
+impl Cancel {
+    pub fn is_cancelled(&self) -> bool {
+        self.req.is_cancelled() || self.shutdown.is_cancelled()
+    }
+
+    /// `Err(Cancelled)` once either token fires. Call at the head of any loop
+    /// that can run longer than a frame.
+    pub fn check(&self) -> Result<(), Cancelled> {
+        if self.is_cancelled() {
+            return Err(Cancelled);
+        }
+        Ok(())
+    }
+
+    /// A handle that never cancels.
+    #[cfg(test)]
+    pub fn never() -> Self {
+        Self {
+            req: CancellationToken::new(),
+            shutdown: CancellationToken::new(),
+        }
+    }
+
+    /// A handle that is already cancelled, for asserting a worker stops.
+    #[cfg(test)]
+    pub fn already() -> Self {
+        let req = CancellationToken::new();
+        req.cancel();
+        Self {
+            req,
+            shutdown: CancellationToken::new(),
+        }
+    }
+}
 
 /// Correlates a UI dispatch with its backend spans and its result.
 ///
@@ -140,6 +199,18 @@ impl<T> BackendTask<T> {
         self.id
     }
 
+    /// A handle that cancels this task when dropped.
+    ///
+    /// Mirrors [`BackendStream::inflight`]. The dispatch layer consumes the
+    /// task by `join`ing it, so a view that wants to supersede a one-shot
+    /// request has to hold the leash separately — this is that leash.
+    pub fn inflight(&self) -> Inflight {
+        Inflight {
+            id: self.id,
+            token: self.token.clone(),
+        }
+    }
+
     /// Await the answer.
     ///
     /// `Err(BackendError::ShuttingDown)` means the worker went away without
@@ -238,6 +309,15 @@ impl<T, S> StreamSink<T, S> {
         self.token.is_cancelled() || self.tx.is_closed()
     }
 
+    /// A [`Cancel`] observing both this request and runtime shutdown, for
+    /// handing to work that should not know about sinks.
+    pub fn cancel_handle(&self, rt: &BackendRuntime) -> Cancel {
+        Cancel {
+            req: self.token.clone(),
+            shutdown: rt.shutdown_token().clone(),
+        }
+    }
+
     /// Send from a **blocking** context (inside `runtime.blocking(..)`).
     ///
     /// Returns `false` if the item could not be delivered, which always means
@@ -314,6 +394,15 @@ pub struct TaskSink<T> {
 impl<T> TaskSink<T> {
     pub fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
+    }
+
+    /// A [`Cancel`] observing both this request and runtime shutdown, for
+    /// handing to work that should not know about sinks.
+    pub fn cancel_handle(&self, rt: &BackendRuntime) -> Cancel {
+        Cancel {
+            req: self.token.clone(),
+            shutdown: rt.shutdown_token().clone(),
+        }
     }
 
     /// Deliver the answer. Dropping the sink without calling this surfaces as
@@ -484,6 +573,44 @@ mod tests {
         assert!(!sink.is_cancelled());
         drop(task);
         assert!(sink.is_cancelled());
+    }
+
+    #[test]
+    fn a_task_inflight_cancels_the_sink_when_dropped() {
+        let (sink, task) = task_channel::<u32>();
+        let leash = task.inflight();
+        assert_eq!(leash.id(), task.id());
+        assert!(!sink.is_cancelled());
+        drop(leash);
+        assert!(
+            sink.is_cancelled(),
+            "dropping the leash must stop the worker, not merely discard its answer"
+        );
+    }
+
+    #[test]
+    fn a_cancel_handle_observes_the_request_token() {
+        let (sink, task) = task_channel::<u32>();
+        let cancel = sink.cancel_handle(rt());
+        assert!(cancel.check().is_ok());
+        drop(task);
+        assert!(cancel.is_cancelled());
+        assert_eq!(cancel.check(), Err(Cancelled));
+    }
+
+    #[test]
+    fn a_stream_cancel_handle_observes_the_request_token() {
+        let (sink, stream) = stream_channel::<u32, ()>(1);
+        let cancel = sink.cancel_handle(rt());
+        assert!(cancel.check().is_ok());
+        stream.inflight().cancel();
+        assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn the_test_cancel_constructors_do_what_they_say() {
+        assert!(Cancel::never().check().is_ok());
+        assert!(Cancel::already().is_cancelled());
     }
 
     #[test]

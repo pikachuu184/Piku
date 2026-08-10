@@ -108,6 +108,36 @@ pub enum MetadataError {
     Cancelled,
 }
 
+/// Preview generation failures.
+///
+/// Read failures reuse [`FileError`] rather than restating them. The preview
+/// engine opens files under the same symlink / regular-file policy as every
+/// other reader, and a second copy of those strings is how they drift apart —
+/// `preview_read_failures_match_the_storage_provider` pins that they do not.
+///
+/// Note what is *not* here: "too large" is not a failure. A file past the
+/// decode caps is a successful classification with its own rendering, so it
+/// stays a payload variant.
+#[derive(Debug, thiserror::Error)]
+pub enum PreviewError {
+    #[error(transparent)]
+    Path(#[from] PathError),
+    #[error(transparent)]
+    File(#[from] FileError),
+    /// The parser refused the input. Carries the provider's own wording, which
+    /// is what already reaches the user today through `PreviewContent::Error`.
+    #[error("{0}")]
+    Undecodable(Arc<str>),
+    #[error("cancelled")]
+    Cancelled,
+}
+
+impl From<crate::backend::protocol::Cancelled> for PreviewError {
+    fn from(_: crate::backend::protocol::Cancelled) -> Self {
+        Self::Cancelled
+    }
+}
+
 /// Drive and mount discovery failures.
 #[derive(Debug, thiserror::Error)]
 pub enum DriveError {
@@ -134,6 +164,8 @@ pub enum BackendError {
     Metadata(#[from] MetadataError),
     #[error(transparent)]
     Drive(#[from] DriveError),
+    #[error(transparent)]
+    Preview(#[from] PreviewError),
     #[error("the backend is shutting down")]
     ShuttingDown,
 }
@@ -146,7 +178,11 @@ impl BackendError {
             Self::Directory(DirectoryError::Cancelled)
             | Self::File(FileError::Cancelled)
             | Self::Metadata(MetadataError::Cancelled)
-            | Self::Drive(DriveError::Cancelled) => true,
+            | Self::Drive(DriveError::Cancelled)
+            | Self::Preview(PreviewError::Cancelled)
+            // A preview whose *read* was cancelled is still a cancellation;
+            // without this arm a superseded selection would raise a toast.
+            | Self::Preview(PreviewError::File(FileError::Cancelled)) => true,
             // A shutdown drain is not a user-visible failure either; treating
             // it as cancellation keeps quit from raising an error toast.
             Self::ShuttingDown => true,
@@ -196,12 +232,59 @@ mod tests {
         }
     }
 
+    /// `PreviewError` deliberately reuses `FileError` for read failures instead
+    /// of restating them. This runs the *real* `LocalProvider::open_read`
+    /// against the two inputs it refuses and asserts the wrapped variants
+    /// render identically — so when Stage 7's `preview::read` replaces that
+    /// call, the strings the user sees cannot drift.
+    #[test]
+    fn preview_read_failures_match_the_storage_provider() {
+        let dir = std::env::temp_dir().join("piku-preview-error-golden");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        // A directory is not a regular file.
+        let got = crate::storage::local()
+            .open_read(&dir)
+            .expect_err("a directory must be refused");
+        let expected = PreviewError::File(FileError::NotRegular(
+            dir.display().to_string().as_str().into(),
+        ));
+        assert_eq!(format!("{got:#}"), expected.to_string());
+
+        // A symlink is refused before it is followed.
+        #[cfg(unix)]
+        {
+            let target = dir.join("real.txt");
+            let link = dir.join("link.txt");
+            let _ = std::fs::write(&target, b"x");
+            std::os::unix::fs::symlink(&target, &link).expect("symlink");
+            let got = crate::storage::local()
+                .open_read(&link)
+                .expect_err("a symlink must be refused");
+            let expected = PreviewError::File(FileError::IsSymlink(
+                link.display().to_string().as_str().into(),
+            ));
+            assert_eq!(format!("{got:#}"), expected.to_string());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn cancellation_is_recognized_through_the_wrapper() {
         assert!(BackendError::from(DirectoryError::Cancelled).is_cancelled());
         assert!(BackendError::from(FileError::Cancelled).is_cancelled());
         assert!(BackendError::from(MetadataError::Cancelled).is_cancelled());
         assert!(BackendError::ShuttingDown.is_cancelled());
+        assert!(BackendError::from(PreviewError::Cancelled).is_cancelled());
+        // A superseded selection cancels mid-read; that is not a toast.
+        assert!(BackendError::from(PreviewError::File(FileError::Cancelled)).is_cancelled());
+        assert!(
+            !BackendError::from(PreviewError::Undecodable("not a readable zip".into()))
+                .is_cancelled(),
+            "a parser refusal is a real failure"
+        );
         assert!(!BackendError::from(PathError::Traversal).is_cancelled());
         assert!(
             !BackendError::from(FileError::AlreadyExists("a.txt".into())).is_cancelled(),
