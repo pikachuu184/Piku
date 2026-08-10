@@ -88,7 +88,11 @@ impl VideoPlayer {
     /// the decode runs on its own thread and fills only the bounded queue.
     pub fn new(path: PathBuf) -> Self {
         let shared = Arc::new(Shared::default());
-        let (stream, sink) = build_audio(&path);
+        // No audio yet. Opening the file and building the decoder is blocking
+        // work, and this runs inside `cx.new` on the UI thread — it was the
+        // last `storage::open_read` left there. `attach_audio` finishes the job
+        // once the decoder arrives from a worker.
+        let (stream, sink) = (None, None);
         let mut player = Self {
             path,
             shared,
@@ -278,15 +282,38 @@ impl VideoPlayer {
         self.current.clone()
     }
 
-    /// Save a PNG of the frame at the current position into the app cache dir.
-    /// Uses a fresh one-shot ffmpeg grab (decoupled from the display pipeline so
-    /// it always works), returning the written path.
-    pub fn screenshot(&self) -> Option<PathBuf> {
-        crate::backend::services::preview::probe::save_frame_png(
-            &self.path,
-            self.position_ms(),
-            &crate::backend::protocol::Cancel::never(),
-        )
+    /// Attach an audio track built off-thread.
+    ///
+    /// Must run on the thread that owns the player: `OutputStream` is `!Send`,
+    /// so it is created here rather than travelling with the decoder.
+    pub fn attach_audio(&mut self, track: AudioTrack) {
+        let Ok((stream, handle)) = OutputStream::try_default() else {
+            return;
+        };
+        let sink = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let sink = Sink::try_new(&handle).ok()?;
+            sink.pause();
+            sink.append(track);
+            Some(sink)
+        }))
+        .ok()
+        .flatten();
+        let Some(sink) = sink else {
+            return;
+        };
+        // Match whatever the user has already set while the track was loading.
+        sink.set_volume(if self.muted { 0.0 } else { self.volume });
+        sink.set_speed(self.speed);
+        if self.playing {
+            sink.play();
+        }
+        self._stream = Some((stream, handle));
+        self.sink = Some(sink);
+    }
+
+    /// The file this player is showing, for a screenshot request.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
     }
 }
 
@@ -298,31 +325,29 @@ impl Drop for VideoPlayer {
     }
 }
 
-/// Build a paused rodio sink for the file's audio track. Returns the stream
-/// (kept alive for output) and the sink; either is `None` on failure (no audio
-/// device, or the container's audio can't be decoded → silent playback).
-fn build_audio(
-    path: &std::path::Path,
-) -> (Option<(OutputStream, OutputStreamHandle)>, Option<Sink>) {
-    let Ok((file, _)) = crate::storage::local().open_read(path) else {
-        return (None, None);
-    };
-    let Ok((stream, handle)) = OutputStream::try_default() else {
-        return (None, None);
-    };
-    // rodio/symphonia can *panic* (not just error) while probing a track it
-    // can't seek — common for video containers with no/odd audio. Catch it so a
-    // video with unplayable audio plays silently instead of crashing the app.
-    let sink = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let decoder = Decoder::new(BufReader::new(file)).ok()?;
-        let sink = Sink::try_new(&handle).ok()?;
-        sink.pause();
-        sink.append(decoder);
-        Some(sink)
+/// The audio track, decoded and ready to hand to a sink.
+///
+/// `Send`, which is the whole point of the split below.
+pub type AudioTrack = Decoder<BufReader<std::fs::File>>;
+
+/// Open the file and build its audio decoder. **Blocking — worker threads
+/// only.**
+///
+/// This is the half of the old `build_audio` that can move off the UI thread.
+/// The other half cannot: `rodio::OutputStream` is `!Send`, so it must be
+/// created on the thread that will hold it, which is why `attach_audio` exists
+/// rather than this simply returning a `Sink`.
+///
+/// rodio/symphonia can *panic* (not just error) while probing a track it cannot
+/// seek — common for video containers with no or odd audio — so the probe is
+/// wrapped. A video with unplayable audio plays silently instead of crashing.
+pub fn open_audio_track(path: &std::path::Path) -> Option<AudioTrack> {
+    let (file, _) = crate::storage::local().open_read(path).ok()?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Decoder::new(BufReader::new(file)).ok()
     }))
     .ok()
-    .flatten();
-    (Some((stream, handle)), sink)
+    .flatten()
 }
 
 /// The decode thread body: drive ffmpeg, convert frames, push under backpressure.

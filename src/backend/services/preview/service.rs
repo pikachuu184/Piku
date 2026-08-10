@@ -260,6 +260,51 @@ impl PreviewService {
         task
     }
 
+    /// Grab the video frame at `at_ms` and write it into the screenshot cache,
+    /// returning the path written.
+    ///
+    /// Spawning ffmpeg takes hundreds of milliseconds, and this used to run
+    /// straight out of the button's click handler — a visible freeze on every
+    /// screenshot. It is a `BackendTask` rather than fire-and-forget because
+    /// the toast needs the resulting path.
+    pub fn save_frame(
+        &self,
+        path: PathBuf,
+        at_ms: u64,
+    ) -> BackendTask<Result<PathBuf, PreviewError>> {
+        let (sink, task) = task_channel();
+        let id = task.id();
+        let inner = self.0.clone();
+
+        let spawned = self.0.rt.spawn(async move {
+            let span = tracing::info_span!(
+                target: "piku::preview", parent: None, "preview.save_frame", req = %id, at_ms,
+            );
+            let _entered = span.enter();
+
+            let cancel = sink.cancel_handle(inner.rt);
+            let for_worker = inner.clone();
+            let joined = inner.rt.blocking(move || {
+                let validated = for_worker.policy.validate(&path)?;
+                probe::save_frame_png(validated.as_path(), at_ms, &cancel).ok_or_else(|| {
+                    PreviewError::Undecodable("could not capture a frame from this video".into())
+                })
+            });
+
+            let outcome = tokio::select! {
+                biased;
+                () = inner.rt.shutdown_token().cancelled() => Err(PreviewError::Cancelled),
+                joined = joined => joined.unwrap_or(Err(PreviewError::Cancelled)),
+            };
+            sink.finish(outcome);
+        });
+
+        if spawned.is_none() {
+            tracing::debug!(target: "piku::preview", req = %id, "save_frame not dispatched");
+        }
+        task
+    }
+
     /// Decode a batch of thumbnails, streaming them back as they land.
     ///
     /// **Order is priority.** The caller passes them in the order it wants them

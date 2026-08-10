@@ -72,10 +72,6 @@ pub trait BackendExt<V: 'static> {
 
     /// As [`backend_task`](Self::backend_task), but `apply` also receives the
     /// `Window` — needed for toasts and focus changes.
-    #[expect(
-        dead_code,
-        reason = "wired up by the File/Transfer services in Stage 5"
-    )]
     fn backend_task_in<T: Send + 'static>(
         &mut self,
         window: &mut Window,
