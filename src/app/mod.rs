@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod assets;
 pub mod diagnostics;
+pub mod http;
 pub mod logo;
 mod piku_app;
 

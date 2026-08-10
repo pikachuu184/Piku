@@ -71,6 +71,10 @@ sysinfo = "0.33"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "ico", "tiff"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 lofty = "0.22"
+# Already in the lock file as a gpui-component dependency; promoting it to a
+# direct one costs nothing and lets `markdown_safe` parse with the *exact*
+# parser and options the renderer uses, so spans line up byte-for-byte.
+markdown = "1"
 # Audio playback + decoding (rodio bundles symphonia; broaden codec coverage).
 rodio = { version = "0.20", features = ["symphonia-all"] }
 # Pure-Rust MP4/MOV metadata (duration, resolution, codec) — no ffmpeg needed.

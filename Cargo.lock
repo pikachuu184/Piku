@@ -6324,6 +6324,7 @@ dependencies = [
  "gpui_platform",
  "image",
  "lofty",
+ "markdown",
  "mp4",
  "notify 8.2.0",
  "open",

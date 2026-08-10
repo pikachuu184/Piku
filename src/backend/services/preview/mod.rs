@@ -14,6 +14,7 @@
 
 pub mod content;
 pub mod language;
+pub mod markdown_safe;
 pub mod probe;
 pub mod providers;
 pub mod read;
