@@ -12,10 +12,12 @@ use tokio::sync::Semaphore;
 
 use crate::backend::error::PreviewError;
 use crate::backend::path::PathPolicy;
-use crate::backend::protocol::{BackendTask, task_channel};
+use crate::backend::protocol::{
+    BackendStream, BackendTask, Cancel, StreamItem, stream_channel, task_channel,
+};
 use crate::backend::runtime::BackendRuntime;
-use crate::backend::services::preview::content::PreviewPayload;
-use crate::backend::services::preview::{PreviewKind, kind_for_path, load};
+use crate::backend::services::preview::content::{PreviewPayload, RawImage};
+use crate::backend::services::preview::{PreviewKind, decode, kind_for_path, load, probe};
 use crate::core::entry::FsEntry;
 
 /// Concurrent full previews.
@@ -100,6 +102,73 @@ impl PreviewRequest {
 pub struct PreviewReady {
     pub key: PreviewKey,
     pub payload: PreviewPayload,
+}
+
+/// Longest edge of a generated thumbnail. One size serves both the grid
+/// (~34 px) and the list (~16 px) even at high DPI, so a file is decoded once
+/// and both views share the result.
+pub const THUMB_TARGET: u32 = 96;
+
+/// Files larger than this keep the glyph icon — bounds worst-case decode work
+/// for hostile or enormous images before [`decode`] even sees them.
+pub const THUMB_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Thumbnails decoded in parallel, and the granularity at which the stream
+/// batches and re-checks cancellation. Was the old cache's `MAX_ACTIVE`.
+const THUMB_CHUNK: usize = 6;
+
+/// Which decoder a queued thumbnail needs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThumbSource {
+    Image,
+    Video,
+}
+
+/// Identifies one thumbnail. `target` is part of the identity so a future
+/// second size cannot collide with the current one.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ThumbKey {
+    pub path: PathBuf,
+    /// Whole seconds since the epoch, `0` when unknown.
+    pub mtime: u64,
+    pub target: u32,
+}
+
+impl ThumbKey {
+    pub fn for_entry(entry: &FsEntry, target: u32) -> Self {
+        Self {
+            path: entry.path.clone(),
+            mtime: entry
+                .modified
+                .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            target,
+        }
+    }
+}
+
+pub struct ThumbRequest {
+    pub key: ThumbKey,
+    pub source: ThumbSource,
+}
+
+/// One finished thumbnail. `image: None` means a **permanent** failure — the
+/// cache records it so the file is never retried at this key.
+pub struct Thumbnail {
+    pub key: ThumbKey,
+    pub image: Option<RawImage>,
+}
+
+/// The terminal item of a thumbnail stream.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ThumbSummary {
+    pub requested: usize,
+    pub decoded: usize,
+    pub failed: usize,
+    /// Never attempted, because the batch was superseded. This is the number
+    /// that used to be zero: before cancellation, every queued decode ran.
+    pub skipped: usize,
 }
 
 struct Inner {
@@ -189,6 +258,115 @@ impl PreviewService {
             tracing::debug!(target: "piku::preview", req = %id, "not dispatched: runtime draining");
         }
         task
+    }
+
+    /// Decode a batch of thumbnails, streaming them back as they land.
+    ///
+    /// **Order is priority.** The caller passes them in the order it wants them
+    /// on screen — which for the file list is visible-first, because the
+    /// virtual list only builds rows in the visible range, so first-seen order
+    /// *is* visible order.
+    ///
+    /// Dropping the stream (or its `Inflight`) stops the decoder at the next
+    /// chunk boundary; the rest of the list is reported as `skipped`.
+    pub fn thumbnails(&self, batch: Vec<ThumbRequest>) -> BackendStream<Thumbnail, ThumbSummary> {
+        // Capacity in batches, not items: a screenful of tiles costs a handful
+        // of channel sends rather than one per thumbnail.
+        let (sink, stream) = stream_channel(4);
+        let id = stream.id();
+        let inner = self.0.clone();
+        let requested = batch.len();
+
+        let spawned = self.0.rt.spawn(async move {
+            let span = tracing::info_span!(
+                target: "piku::preview",
+                parent: None,
+                "preview.thumbnails",
+                req = %id,
+                requested,
+            );
+            let _entered = span.enter();
+
+            let cancel = sink.cancel_handle(inner.rt);
+            let for_worker = inner.clone();
+            let joined = inner.rt.blocking(move || {
+                let mut summary = ThumbSummary {
+                    requested,
+                    ..Default::default()
+                };
+                let mut chunks = batch.chunks(THUMB_CHUNK).peekable();
+                let mut done = 0usize;
+
+                while let Some(chunk) = chunks.next() {
+                    // Checked per chunk rather than per item: a superseded
+                    // scroll stops within six decodes, and the check costs
+                    // nothing next to a decode.
+                    if sink.is_cancelled() {
+                        summary.skipped = requested - done;
+                        break;
+                    }
+                    done += chunk.len();
+
+                    // Six at a time on the CPU pool. Sequential would be
+                    // simpler but would regress a 500-tile grid against the
+                    // six-concurrent decoding this replaces.
+                    let decoded: Vec<Thumbnail> = for_worker.rt.cpu().install(|| {
+                        use rayon::prelude::*;
+                        chunk
+                            .par_iter()
+                            .map(|req| Thumbnail {
+                                key: req.key.clone(),
+                                image: decode_thumb(&for_worker.policy, req, &cancel),
+                            })
+                            .collect()
+                    });
+
+                    for thumb in &decoded {
+                        if thumb.image.is_some() {
+                            summary.decoded += 1;
+                        } else {
+                            summary.failed += 1;
+                        }
+                    }
+                    if !sink.send_blocking(StreamItem::Batch(decoded)) {
+                        // Consumer gone or cancelled mid-send.
+                        summary.skipped = requested.saturating_sub(done);
+                        break;
+                    }
+                    let _ = chunks.peek();
+                }
+
+                sink.finish_blocking(Ok(summary));
+            });
+
+            tokio::select! {
+                biased;
+                () = inner.rt.shutdown_token().cancelled() => {}
+                _ = joined => {}
+            }
+        });
+
+        if spawned.is_none() {
+            tracing::debug!(
+                target: "piku::preview", req = %id, "thumbnails not dispatched: runtime draining"
+            );
+        }
+        stream
+    }
+}
+
+/// Decode one thumbnail. `None` for anything that will not or cannot safely
+/// render, which the cache records as a permanent failure.
+fn decode_thumb(policy: &PathPolicy, req: &ThumbRequest, cancel: &Cancel) -> Option<RawImage> {
+    // Same authorization rule as `preview`: the untrusted path is validated in
+    // the worker, lexically, so a symlink is still refused at open time rather
+    // than resolved away.
+    let validated = policy.validate(&req.key.path).ok()?;
+    let path = validated.as_path();
+    match req.source {
+        ThumbSource::Image => decode::thumbnail(path, req.key.target, THUMB_MAX_BYTES, cancel).ok(),
+        // ffmpeg produces a PNG poster; it has its own size and timeout gates.
+        ThumbSource::Video => probe::poster_frame(path, Some(req.key.target), cancel),
     }
 }
 
@@ -344,6 +522,123 @@ mod tests {
         assert!(result.is_ok(), "the consumer must still receive an answer");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Thumbnails arrive in the order they were asked for, which is what makes
+    /// "order is priority" true rather than aspirational.
+    #[test]
+    fn thumbnails_stream_back_in_request_order() {
+        let dir = scratch("thumbs");
+        let names: Vec<PathBuf> = (0..8)
+            .map(|i| {
+                let p = dir.join(format!("{i}.png"));
+                write_test_png(&p);
+                p
+            })
+            .collect();
+
+        let batch: Vec<ThumbRequest> = names
+            .iter()
+            .map(|p| ThumbRequest {
+                key: ThumbKey {
+                    path: p.clone(),
+                    mtime: 0,
+                    target: THUMB_TARGET,
+                },
+                source: ThumbSource::Image,
+            })
+            .collect();
+
+        let mut stream = service().thumbnails(batch);
+        let mut got: Vec<PathBuf> = Vec::new();
+        let mut summary = None;
+        block_on(async {
+            while let Some(item) = stream.next().await {
+                match item {
+                    StreamItem::Batch(thumbs) => {
+                        got.extend(thumbs.into_iter().map(|t| t.key.path));
+                    }
+                    StreamItem::Done(result) => {
+                        summary = result.ok();
+                        break;
+                    }
+                    StreamItem::Progress(_) => {}
+                }
+            }
+        });
+
+        assert_eq!(got, names, "thumbnails came back out of order");
+        let summary = summary.expect("a terminal summary");
+        assert_eq!(summary.requested, 8);
+        assert_eq!(summary.decoded, 8, "{summary:?}");
+        assert_eq!(summary.skipped, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The headline behaviour for scrolling: a superseded batch must stop,
+    /// leaving work *unattempted* rather than running it to completion.
+    #[test]
+    fn a_superseded_thumbnail_batch_stops_decoding_the_rest_of_its_list() {
+        let dir = scratch("superseded");
+        // Enough chunks that cancelling after the first leaves plenty behind.
+        let batch: Vec<ThumbRequest> = (0..200)
+            .map(|i| {
+                let p = dir.join(format!("{i}.png"));
+                write_test_png(&p);
+                ThumbRequest {
+                    key: ThumbKey {
+                        path: p,
+                        mtime: 0,
+                        target: THUMB_TARGET,
+                    },
+                    source: ThumbSource::Image,
+                }
+            })
+            .collect();
+
+        let mut stream = service().thumbnails(batch);
+        let leash = stream.inflight();
+        let mut summary = None;
+        block_on(async {
+            while let Some(item) = stream.next().await {
+                match item {
+                    // Supersede as soon as the first results land, the way a
+                    // scroll would.
+                    StreamItem::Batch(_) => leash.cancel(),
+                    StreamItem::Done(result) => {
+                        summary = result.ok();
+                        break;
+                    }
+                    StreamItem::Progress(_) => {}
+                }
+            }
+        });
+
+        let summary = summary.expect("a cancelled batch still owes a summary");
+        assert_eq!(summary.requested, 200);
+        assert!(
+            summary.skipped > 0,
+            "a superseded batch decoded everything anyway: {summary:?}"
+        );
+        assert!(
+            summary.decoded < 200,
+            "nothing was actually skipped: {summary:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 4×4 PNG — small enough that 200 of them are cheap, real enough that
+    /// the decode path is genuinely exercised.
+    fn write_test_png(path: &Path) {
+        use image::ImageEncoder as _;
+        let buf = image::RgbaImage::from_pixel(4, 4, image::Rgba([7, 9, 11, 255]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(buf.as_raw(), 4, 4, image::ExtendedColorType::Rgba8)
+            .expect("encode");
+        let _ = std::fs::write(path, bytes);
     }
 
     #[test]

@@ -29,7 +29,6 @@ use crate::state::PikuState;
 
 /// What a stream consumer wants to happen next.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[expect(dead_code, reason = "wired up by the streaming listing in Stage 3")]
 pub enum Flow {
     /// Keep draining.
     Continue,
@@ -91,7 +90,6 @@ pub trait BackendExt<V: 'static> {
     /// storing it in the view is what ties the request's lifetime to the
     /// view's — and replacing it is what supersedes an older request.
     #[must_use = "dropping the Inflight immediately cancels the request"]
-    #[expect(dead_code, reason = "wired up by the streaming listing in Stage 3")]
     fn backend_stream<T: Send + 'static, S: Send + 'static>(
         &mut self,
         make: impl FnOnce(&Backend) -> BackendStream<T, S>,

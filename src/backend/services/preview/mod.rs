@@ -13,6 +13,7 @@
 //! wrapped in `catch_unwind` at their call sites.
 
 pub mod content;
+pub mod decode;
 pub mod language;
 pub mod markdown_safe;
 pub mod probe;
@@ -28,7 +29,9 @@ use crate::backend::protocol::Cancel;
 use crate::core::entry::{EntryKind, FsEntry};
 use content::PreviewPayload;
 
-pub use service::{PreviewKey, PreviewRequest, PreviewService};
+pub use service::{
+    PreviewKey, PreviewRequest, PreviewService, THUMB_TARGET, ThumbKey, ThumbRequest, ThumbSource,
+};
 
 /// Hard caps every provider honours. Previews show a file's head, not the
 /// whole file — the caps keep a multi-GB selection O(small).
