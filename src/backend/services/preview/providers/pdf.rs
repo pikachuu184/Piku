@@ -3,20 +3,24 @@
 //! Hardening: the pdfium library is a C parser on untrusted input. We cap the
 //! document size before handing bytes over ([`PDF_MAX_BYTES`]), cap the page
 //! count ([`PDF_MAX_PAGES`]), render only a bounded subset of pages, run
-//! everything on the background executor, and wrap the parse/render in
-//! `catch_unwind`. pdfium's V8/JavaScript feature is disabled (not enabled in
-//! `Cargo.toml`) and forms are never initialized, so no embedded document
-//! script ever executes. If the pdfium library is not present the preview
-//! degrades to a friendly note rather than failing.
-
-use std::path::Path;
+//! everything on a worker thread, and wrap the parse/render in `catch_unwind`.
+//! pdfium's V8/JavaScript feature is disabled (not enabled in `Cargo.toml`) and
+//! forms are never initialized, so no embedded document script ever executes.
+//! If the pdfium library is not present the preview degrades to a friendly note
+//! rather than failing.
+//!
+//! Pdfium is documented as *not* thread-safe; `pdfium-render` serializes every
+//! call behind a mutex. Rendering therefore gains nothing from parallelism and
+//! is deliberately left sequential.
 
 use pdfium_render::prelude::*;
 
-use crate::preview::content::PreviewContent;
-use crate::preview::image_util::render_image_from_rgba;
-use crate::preview::{PDF_MAX_BYTES, PDF_MAX_PAGES};
-use crate::storage::provider::StorageProvider as _;
+use crate::backend::error::PreviewError;
+use crate::backend::protocol::Cancel;
+use crate::backend::services::preview::content::{PreviewPayload, RawImage};
+use crate::backend::services::preview::{
+    LoadCtx, PDF_MAX_BYTES, PDF_MAX_PAGES, PreviewKind, PreviewProvider, read,
+};
 
 /// Pages rasterized for the (scrollable) preview; large documents show the
 /// first N with a note.
@@ -31,30 +35,44 @@ enum PdfError {
     Unavailable,
     /// The document could not be parsed/rendered.
     Failed,
+    /// The request was superseded mid-render.
+    Cancelled,
 }
 
-pub fn load_pdf(path: &Path) -> PreviewContent {
-    // Cap the size before the C parser ever sees the bytes.
-    let (bytes, total) = match crate::storage::local().read_head(path, PDF_MAX_BYTES as usize) {
-        Ok(pair) => pair,
-        Err(error) => return PreviewContent::Error(format!("{error:#}").into()),
-    };
-    if total > PDF_MAX_BYTES {
-        return PreviewContent::TooLarge { size: total };
+pub struct Pdf;
+
+impl PreviewProvider for Pdf {
+    fn kind(&self) -> PreviewKind {
+        PreviewKind::Pdf
     }
 
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render_pages(&bytes))) {
-        Ok(Ok(content)) => content,
-        Ok(Err(PdfError::Unavailable)) => PreviewContent::Pdf {
-            pages: Vec::new(),
-            total_pages: 0,
-            note: Some("PDF rendering is unavailable (pdfium library not found).".into()),
-        },
-        _ => PreviewContent::Error("Could not render this PDF.".into()),
+    fn load(&self, ctx: &LoadCtx<'_>) -> Result<PreviewPayload, PreviewError> {
+        ctx.cancel.check()?;
+
+        // Cap the size before the C parser ever sees the bytes.
+        let (bytes, total) = read::read_head(ctx.path, PDF_MAX_BYTES as usize)?;
+        if total > PDF_MAX_BYTES {
+            return Ok(PreviewPayload::TooLarge { size: total });
+        }
+
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_pages(&bytes, ctx.cancel)
+        })) {
+            Ok(Ok(payload)) => Ok(payload),
+            Ok(Err(PdfError::Unavailable)) => Ok(PreviewPayload::Pdf {
+                pages: Vec::new(),
+                total_pages: 0,
+                note: Some("PDF rendering is unavailable (pdfium library not found).".into()),
+            }),
+            Ok(Err(PdfError::Cancelled)) => Err(PreviewError::Cancelled),
+            _ => Err(PreviewError::Undecodable(
+                "Could not render this PDF.".into(),
+            )),
+        }
     }
 }
 
-fn render_pages(bytes: &[u8]) -> Result<PreviewContent, PdfError> {
+fn render_pages(bytes: &[u8], cancel: &Cancel) -> Result<PreviewPayload, PdfError> {
     let pdfium = bind_pdfium().ok_or(PdfError::Unavailable)?;
     let document = pdfium
         .load_pdf_from_byte_slice(bytes, None)
@@ -65,7 +83,7 @@ fn render_pages(bytes: &[u8]) -> Result<PreviewContent, PdfError> {
         return Err(PdfError::Failed);
     }
     if total_pages > PDF_MAX_PAGES {
-        return Ok(PreviewContent::Pdf {
+        return Ok(PreviewPayload::Pdf {
             pages: Vec::new(),
             total_pages,
             note: Some("Document has too many pages to preview.".into()),
@@ -79,21 +97,30 @@ fn render_pages(bytes: &[u8]) -> Result<PreviewContent, PdfError> {
 
     let mut pages = Vec::with_capacity(render_count);
     for index in 0..render_count as u16 {
+        // Each page is a full rasterization at up to 1000x4000; a twelve-page
+        // document is real work, and a superseded selection should not pay for
+        // the remaining pages.
+        if cancel.is_cancelled() {
+            return Err(PdfError::Cancelled);
+        }
         let Ok(page) = document.pages().get(index) else {
             break;
         };
         let Ok(bitmap) = page.render_with_config(&config) else {
             continue;
         };
-        pages.push(render_image_from_rgba(bitmap.as_image().into_rgba8()));
+        pages.push(RawImage::from_rgba(bitmap.as_image().into_rgba8()));
     }
     if pages.is_empty() {
         return Err(PdfError::Failed);
     }
 
-    let note = (total_pages > render_count)
-        .then(|| format!("Showing the first {render_count} of {total_pages} pages.").into());
-    Ok(PreviewContent::Pdf {
+    let note = (total_pages > render_count).then(|| {
+        format!("Showing the first {render_count} of {total_pages} pages.")
+            .as_str()
+            .into()
+    });
+    Ok(PreviewPayload::Pdf {
         pages,
         total_pages,
         note,
@@ -135,31 +162,47 @@ startxref\n\
 164\n\
 %%EOF";
 
+    fn pdfium_staged() -> bool {
+        exe_dir()
+            .map(|dir| Pdfium::pdfium_platform_library_name_at_path(&dir).exists())
+            .unwrap_or(false)
+    }
+
     #[test]
     fn renders_when_pdfium_present() {
         // Only runs where the vendored pdfium library is staged next to the
         // test binary (build.rs copies it there); otherwise it is a no-op so
         // CI without the DLL still passes.
-        let staged = exe_dir()
-            .map(|dir| Pdfium::pdfium_platform_library_name_at_path(&dir).exists())
-            .unwrap_or(false);
-        if !staged {
+        if !pdfium_staged() {
             eprintln!("pdfium library not staged next to test binary — skipping");
             return;
         }
 
-        match render_pages(MINIMAL_PDF) {
-            Ok(PreviewContent::Pdf {
+        match render_pages(MINIMAL_PDF, &Cancel::never()) {
+            Ok(PreviewPayload::Pdf {
                 pages, total_pages, ..
             }) => {
                 assert_eq!(total_pages, 1, "expected a single-page document");
                 assert_eq!(pages.len(), 1, "expected one rendered page image");
             }
             Ok(other) => panic!(
-                "unexpected preview content: {:?}",
+                "unexpected preview payload: {:?}",
                 std::mem::discriminant(&other)
             ),
             Err(_) => panic!("pdfium is present but rendering the minimal PDF failed"),
         }
+    }
+
+    /// A cancelled request must not rasterize a single page.
+    #[test]
+    fn an_already_cancelled_render_produces_no_pages() {
+        if !pdfium_staged() {
+            eprintln!("pdfium library not staged next to test binary — skipping");
+            return;
+        }
+        assert!(matches!(
+            render_pages(MINIMAL_PDF, &Cancel::already()),
+            Err(PdfError::Cancelled)
+        ));
     }
 }

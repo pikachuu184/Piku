@@ -25,6 +25,8 @@ use gpui_component::{
 };
 
 use crate::app::assets::PikuIcon;
+use crate::backend::dispatch::BackendExt as _;
+use crate::backend::error::BackendError;
 use crate::services::video_player::VideoPlayer;
 use crate::ui::media::transport::fmt_clock;
 
@@ -43,12 +45,27 @@ impl VideoView {
     pub fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
         let view = Self {
             focus_handle: cx.focus_handle(),
-            player: VideoPlayer::new(path),
+            player: VideoPlayer::new(path.clone()),
             fullscreen: false,
             controls_visible: true,
             hide_at: None,
         };
         view.start_ticker(cx);
+        // The player starts silent: opening the file and building the audio
+        // decoder is blocking work, and this constructor runs inside `cx.new`
+        // on the UI thread. The decoder is `Send`, so it is built on a worker
+        // and attached here; `OutputStream` is `!Send`, which is why the sink
+        // itself is created on this side.
+        cx.spawn(async move |this, cx| {
+            let track = cx
+                .background_executor()
+                .spawn(async move { crate::services::video_player::open_audio_track(&path) })
+                .await;
+            if let Some(track) = track {
+                let _ = this.update(cx, |this, _| this.player.attach_audio(track));
+            }
+        })
+        .detach();
         view
     }
 
@@ -256,12 +273,27 @@ impl VideoView {
                             .icon(PikuIcon::Camera)
                             .tooltip("Save a screenshot")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(dest) = this.player.screenshot() {
-                                    window.push_notification(
-                                        crate::ui::toast::info(format!("Saved {}", dest.display())),
-                                        cx,
-                                    );
-                                }
+                                // ffmpeg takes hundreds of milliseconds to
+                                // spawn and grab a frame; running it here froze
+                                // the window on every screenshot.
+                                let path = this.player.path().to_path_buf();
+                                let at_ms = this.player.position_ms();
+                                cx.backend_task_in(
+                                    window,
+                                    move |backend| backend.preview().save_frame(path, at_ms),
+                                    |_, result, window, cx| {
+                                        let toast = match result {
+                                            Ok(dest) => crate::ui::toast::info(format!(
+                                                "Saved {}",
+                                                dest.display()
+                                            )),
+                                            Err(error) => crate::ui::toast::error(
+                                                BackendError::from(error).user_message(),
+                                            ),
+                                        };
+                                        window.push_notification(toast, cx);
+                                    },
+                                );
                             })),
                     )
                     .child(

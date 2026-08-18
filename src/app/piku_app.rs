@@ -16,6 +16,15 @@ pub fn run() {
         // "blocking on the UI thread" from "blocking on a worker".
         crate::app::diagnostics::mark_ui_thread();
 
+        // Before anything can render. PIKU opens no sockets, and gpui's image
+        // loader is the one path that could try — a markdown image becomes a
+        // `Resource::Uri` unconditionally, so previewing a file would otherwise
+        // be enough to fetch an attacker-chosen URL. gpui's default client
+        // already refuses, but by accident rather than by decision; installing
+        // this makes it a decision, and makes the next person to want an HTTP
+        // client confront it.
+        cx.set_http_client(std::sync::Arc::new(crate::app::http::DenyAllHttpClient));
+
         gpui_component::init(cx);
         crate::theme::apply(cx);
         crate::app::actions::init(cx);

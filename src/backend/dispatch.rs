@@ -29,7 +29,6 @@ use crate::state::PikuState;
 
 /// What a stream consumer wants to happen next.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[expect(dead_code, reason = "wired up by the streaming listing in Stage 3")]
 pub enum Flow {
     /// Keep draining.
     Continue,
@@ -54,12 +53,25 @@ pub trait BackendExt<V: 'static> {
         apply: impl FnOnce(&mut V, Result<T, BackendError>, &mut Context<V>) + 'static,
     );
 
+    /// As [`backend_task`](Self::backend_task), but hands back the leash.
+    ///
+    /// Use this wherever a request can be superseded before it finishes — a
+    /// selection change, a re-navigation. Store the [`Inflight`] in the view
+    /// and assign over it: the old one drops, and the worker actually
+    /// **stops**. That is the difference from a `generation: u64` counter,
+    /// which only discards the answer after the work has already been done.
+    ///
+    /// `apply` still runs exactly once, including for the cancelled request —
+    /// so check `BackendError::is_cancelled()` before raising a toast.
+    #[must_use = "dropping the Inflight immediately cancels the request"]
+    fn backend_task_cancellable<T: Send + 'static>(
+        &mut self,
+        make: impl FnOnce(&Backend) -> BackendTask<T>,
+        apply: impl FnOnce(&mut V, Result<T, BackendError>, &mut Context<V>) + 'static,
+    ) -> Inflight;
+
     /// As [`backend_task`](Self::backend_task), but `apply` also receives the
     /// `Window` — needed for toasts and focus changes.
-    #[expect(
-        dead_code,
-        reason = "wired up by the File/Transfer services in Stage 5"
-    )]
     fn backend_task_in<T: Send + 'static>(
         &mut self,
         window: &mut Window,
@@ -74,12 +86,38 @@ pub trait BackendExt<V: 'static> {
     /// storing it in the view is what ties the request's lifetime to the
     /// view's — and replacing it is what supersedes an older request.
     #[must_use = "dropping the Inflight immediately cancels the request"]
-    #[expect(dead_code, reason = "wired up by the streaming listing in Stage 3")]
     fn backend_stream<T: Send + 'static, S: Send + 'static>(
         &mut self,
         make: impl FnOnce(&Backend) -> BackendStream<T, S>,
         apply: impl FnMut(&mut V, StreamItem<T, S>, &mut Context<V>) -> Flow + 'static,
     ) -> Inflight;
+}
+
+/// The shared body of the two one-shot dispatchers.
+///
+/// Factored out rather than having one call the other, because the difference
+/// between them is precisely who owns the cancellation token: creating an
+/// [`Inflight`] and dropping it inside `backend_task` would cancel every
+/// request the instant it was issued.
+fn spawn_task_apply<V: 'static, T: Send + 'static>(
+    cx: &mut Context<V>,
+    task: BackendTask<T>,
+    apply: impl FnOnce(&mut V, Result<T, BackendError>, &mut Context<V>) + 'static,
+) {
+    let id = task.id();
+    tracing::debug!(target: "piku::dispatch", req = %id, "dispatched");
+
+    cx.spawn(async move |this, cx| {
+        let result = task.join().await;
+        if let Err(error) = &result {
+            tracing::debug!(target: "piku::dispatch", req = %id, %error, "failed");
+        }
+        let _ = this.update(cx, |view, cx| {
+            apply(view, result, cx);
+            cx.notify();
+        });
+    })
+    .detach();
 }
 
 impl<V: 'static> BackendExt<V> for Context<'_, V> {
@@ -89,20 +127,20 @@ impl<V: 'static> BackendExt<V> for Context<'_, V> {
         apply: impl FnOnce(&mut V, Result<T, BackendError>, &mut Context<V>) + 'static,
     ) {
         let task = make(PikuState::global(self).backend());
-        let id = task.id();
-        tracing::debug!(target: "piku::dispatch", req = %id, "dispatched");
+        spawn_task_apply(self, task, apply);
+    }
 
-        self.spawn(async move |this, cx| {
-            let result = task.join().await;
-            if let Err(error) = &result {
-                tracing::debug!(target: "piku::dispatch", req = %id, %error, "failed");
-            }
-            let _ = this.update(cx, |view, cx| {
-                apply(view, result, cx);
-                cx.notify();
-            });
-        })
-        .detach();
+    fn backend_task_cancellable<T: Send + 'static>(
+        &mut self,
+        make: impl FnOnce(&Backend) -> BackendTask<T>,
+        apply: impl FnOnce(&mut V, Result<T, BackendError>, &mut Context<V>) + 'static,
+    ) -> Inflight {
+        let task = make(PikuState::global(self).backend());
+        // Taken before the task moves into the future: afterwards the token is
+        // reachable only from inside the spawned closure.
+        let inflight = task.inflight();
+        spawn_task_apply(self, task, apply);
+        inflight
     }
 
     fn backend_task_in<T: Send + 'static>(

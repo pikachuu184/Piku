@@ -10,12 +10,12 @@ use std::io::{BufReader, Read as _};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use gpui::{RenderImage, SharedString};
+use crate::backend::protocol::Cancel;
 
-use crate::preview::image_util::render_image_from_rgba;
+use super::content::{MetaRow, RawImage};
 
 /// Whether a runnable ffmpeg binary is resolvable (bundled next to the exe, in
 /// the sidecar cache, or on PATH). Probed once — the check itself spawns a
@@ -42,7 +42,7 @@ const SCREENSHOT_KEEP: usize = 100;
 /// when ffmpeg is unavailable or extraction fails. Blocking — background
 /// executor only. Uses no temp files (frame is piped through stdout) and kills
 /// the subprocess if it exceeds [`POSTER_TIMEOUT`].
-pub fn poster_frame(path: &Path, target: Option<u32>) -> Option<Arc<RenderImage>> {
+pub fn poster_frame(path: &Path, target: Option<u32>, cancel: &Cancel) -> Option<RawImage> {
     if !ffmpeg_available() {
         return None;
     }
@@ -70,7 +70,7 @@ pub fn poster_frame(path: &Path, target: Option<u32>) -> Option<Arc<RenderImage>
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — no console flash
     }
 
-    let png = run_capture(cmd)?;
+    let png = run_capture(cmd, cancel)?;
     if png.is_empty() {
         return None;
     }
@@ -79,14 +79,14 @@ pub fn poster_frame(path: &Path, target: Option<u32>) -> Option<Arc<RenderImage>
         Some(t) => decoded.thumbnail(t, t).into_rgba8(),
         None => decoded.into_rgba8(),
     };
-    Some(render_image_from_rgba(rgba))
+    Some(RawImage::from_rgba(rgba))
 }
 
 /// Grab the frame at `at_ms` as a PNG and write it into the app-managed
 /// screenshot cache dir (restrictive per-user location), returning the path.
 /// Decoupled from live playback so a screenshot always works. Blocking —
 /// background executor only; same subprocess hardening as [`poster_frame`].
-pub fn save_frame_png(path: &Path, at_ms: u64) -> Option<PathBuf> {
+pub fn save_frame_png(path: &Path, at_ms: u64, cancel: &Cancel) -> Option<PathBuf> {
     if !ffmpeg_available() {
         return None;
     }
@@ -112,7 +112,7 @@ pub fn save_frame_png(path: &Path, at_ms: u64) -> Option<PathBuf> {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
 
-    let png = run_capture(cmd)?;
+    let png = run_capture(cmd, cancel)?;
     if png.is_empty() {
         return None;
     }
@@ -201,7 +201,7 @@ fn prune_screenshots(dir: &Path) {
 /// 8 kHz mono `s16le` on stdout (tiny: ~16 KB/s), which we bucket by abs-max.
 /// Returns `None` when ffmpeg is unavailable or produced nothing. Blocking —
 /// background executor only; same hardening as [`poster_frame`].
-pub fn audio_pcm_peaks(path: &Path, buckets: usize) -> Option<Vec<f32>> {
+pub fn audio_pcm_peaks(path: &Path, buckets: usize, cancel: &Cancel) -> Option<Vec<f32>> {
     if !ffmpeg_available() || buckets == 0 {
         return None;
     }
@@ -225,7 +225,7 @@ pub fn audio_pcm_peaks(path: &Path, buckets: usize) -> Option<Vec<f32>> {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
 
-    let pcm = run_capture(cmd)?;
+    let pcm = run_capture(cmd, cancel)?;
     let n = pcm.len() / 2;
     if n == 0 {
         return None;
@@ -257,8 +257,16 @@ pub fn audio_pcm_peaks(path: &Path, buckets: usize) -> Option<Vec<f32>> {
 
 /// Spawn `cmd`, reading its stdout on a helper thread (so a full pipe never
 /// deadlocks the wait) while enforcing [`POSTER_TIMEOUT`]; the child is killed
-/// on timeout. Returns the captured bytes only on a clean exit.
-fn run_capture(mut cmd: Command) -> Option<Vec<u8>> {
+/// on timeout **or on cancellation**. Returns the captured bytes only on a
+/// clean exit.
+///
+/// The cancellation check is the load-bearing one for two separate problems.
+/// Arrowing through a folder of videos would otherwise leave one ffmpeg per
+/// file running to completion. And [`POSTER_TIMEOUT`] is 15 s while the
+/// runtime's shutdown grace is 100 ms, so without observing the shutdown token
+/// here a quit during a poster extraction either blows through gpui's 200 ms
+/// budget or orphans the subprocess.
+fn run_capture(mut cmd: Command, cancel: &Cancel) -> Option<Vec<u8>> {
     let mut child = cmd.spawn().ok()?;
     let stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
@@ -272,8 +280,10 @@ fn run_capture(mut cmd: Command) -> Option<Vec<u8>> {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
-                if start.elapsed() > POSTER_TIMEOUT {
+                if start.elapsed() > POSTER_TIMEOUT || cancel.is_cancelled() {
                     let _ = child.kill();
+                    // Reap it: without the wait the child lingers as a zombie,
+                    // and the reader thread below never sees its pipe close.
                     let _ = child.wait();
                     break None;
                 }
@@ -289,8 +299,8 @@ fn run_capture(mut cmd: Command) -> Option<Vec<u8>> {
 /// Metadata rows for an MP4-family file, or `None` if it is not MP4/MOV or the
 /// header cannot be parsed. The third-party parser runs inside `catch_unwind`
 /// so a malformed/hostile file degrades gracefully instead of aborting.
-pub fn mp4_metadata(path: &Path) -> Option<Vec<(SharedString, SharedString)>> {
-    let (file, total) = crate::storage::local().open_read(path).ok()?;
+pub fn mp4_metadata(path: &Path) -> Option<Vec<MetaRow>> {
+    let (file, total) = super::read::open_read(path).ok()?;
     if total == 0 {
         return None;
     }
@@ -300,7 +310,7 @@ pub fn mp4_metadata(path: &Path) -> Option<Vec<(SharedString, SharedString)>> {
     }));
     let mp4 = parsed.ok()?.ok()?;
 
-    let mut rows: Vec<(SharedString, SharedString)> = Vec::new();
+    let mut rows: Vec<MetaRow> = Vec::new();
     let secs = mp4.duration().as_secs();
     rows.push((
         "Duration".into(),

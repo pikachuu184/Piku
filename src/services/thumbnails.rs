@@ -1,83 +1,67 @@
-//! Off-thread image thumbnail decoding with a bounded, self-draining work
-//! queue and an LRU cache of BGRA [`RenderImage`]s for the file grid/list.
+//! Resident thumbnails, and the demand that drives decoding them.
 //!
-//! The grid renders every entry (it is not virtualized), so the cache — not
-//! the caller — bounds the work: requests are deduplicated and only
-//! [`MAX_ACTIVE`] decodes run at once, the rest draining as each completes.
-//! Every decode runs on the background executor; the UI thread only ever
-//! looks up already-decoded results.
+//! This type used to own the work: a queue, a concurrency gate, and a
+//! `cx.spawn` per item, fired from inside a render pass. It now owns only
+//! storage and demand. Decoding lives in the preview service, which means it
+//! is bounded, authorized, and — the point — **cancellable**.
+//!
+//! Two behaviours worth naming, because they are what the change bought:
+//!
+//! * **Order is priority.** [`request`](ThumbnailCache::request) records
+//!   demand in first-seen order, and the file list is virtualized, so the
+//!   renderer only asks for rows it is about to draw. First-seen order is
+//!   therefore visible order, and the service decodes in exactly that order.
+//! * **Scrolling supersedes.** Each flush drops the previous stream's
+//!   `Inflight`, so a fast scroll stops the old batch instead of decoding a
+//!   screenful nobody is looking at any more. Before, every queued decode ran
+//!   to completion regardless.
+//!
+//! The debounce also moves dispatch *out* of the render pass: `request` now
+//! pushes to a list and arms a timer, where it used to spawn a task per item
+//! while an element tree was being built.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufReader, Seek as _};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::Duration;
 
 use gpui::{Context, RenderImage};
 
+use crate::backend::dispatch::{BackendExt as _, Flow};
+use crate::backend::protocol::{Inflight, StreamItem};
+use crate::backend::services::preview::{ThumbKey, ThumbRequest, ThumbSource};
 use crate::core::entry::FsEntry;
 use crate::core::file_type::{FileCategory, categorize};
-use crate::preview::image_util::render_image_from_rgba;
+use crate::preview::image_util::render_image_from_bgra;
 
-/// Which decoder a queued thumbnail needs.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ThumbSource {
-    Image,
-    Video,
-}
-
-/// Longest edge (px) of a generated thumbnail. One size serves both the grid
-/// (~34px) and the list (~16px) even at high DPI, so a file is decoded once
-/// and both views share the result.
-pub const THUMB_TARGET: u32 = 96;
-
-/// Files larger than this keep the glyph icon — bounds worst-case decode work
-/// for hostile or enormous images.
-const THUMB_MAX_BYTES: u64 = 32 * 1024 * 1024;
-
-/// Decompression-bomb guard: refuse images whose header promises more pixels
-/// than this before any pixel buffer is allocated.
-const THUMB_MAX_PIXELS: u64 = 100_000_000;
+pub use crate::backend::services::preview::THUMB_TARGET;
 
 /// Most decoded thumbnails kept resident; the least-recently-used is evicted
 /// past this. At ~96×96×4 bytes each this caps resident memory near ~18 MiB.
 const CACHE_CAP: usize = 512;
 
-/// Concurrent background decodes.
-const MAX_ACTIVE: usize = 6;
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct ThumbKey {
-    path: PathBuf,
-    /// Modification time (whole seconds since the epoch) so an edited file is
-    /// re-decoded rather than served stale.
-    mtime: u64,
-    target: u32,
-}
-
-impl ThumbKey {
-    fn for_entry(entry: &FsEntry, target: u32) -> Self {
-        let mtime = entry
-            .modified
-            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        Self {
-            path: entry.path.clone(),
-            mtime,
-            target,
-        }
-    }
-}
+/// How long demand accumulates before a batch is issued.
+///
+/// Long enough that a fast scroll produces one dispatch rather than one per
+/// frame, short enough to be invisible. It also guarantees the dispatch happens
+/// after the render pass that asked for it has finished.
+const FLUSH_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 pub struct ThumbnailCache {
     ready: HashMap<ThumbKey, Arc<RenderImage>>,
+    /// LRU order, front = oldest.
     lru: VecDeque<ThumbKey>,
+    /// Permanent failures. Never retried at this key; a changed mtime makes a
+    /// new key, so an edited file gets another chance.
     failed: HashSet<ThumbKey>,
+    /// Handed to the service and not yet answered.
     inflight: HashSet<ThumbKey>,
-    queue: VecDeque<(ThumbKey, ThumbSource)>,
-    active: usize,
+    /// Demand accumulated since the last flush, in first-seen (visible) order.
+    pending: Vec<(ThumbKey, ThumbSource)>,
+    /// Armed timer, so demand from one render pass costs one dispatch.
+    flush_armed: bool,
+    /// The live batch. Dropping it cancels the decoder.
+    batch: Option<Inflight>,
 }
 
 impl ThumbnailCache {
@@ -90,9 +74,8 @@ impl ThumbnailCache {
     }
 
     /// Ensure a thumbnail for this entry is decoding or ready. Cheap and
-    /// idempotent — safe to call on every render for every visible entry.
-    /// Images decode directly; videos extract a poster frame via ffmpeg (which
-    /// silently fails to a glyph when ffmpeg is not bundled/available).
+    /// idempotent — safe to call on every render for every visible entry, which
+    /// is exactly how `entry_visual` uses it.
     pub fn request(&mut self, entry: &FsEntry, target: u32, cx: &mut Context<Self>) {
         let source = match categorize(entry) {
             FileCategory::Image => ThumbSource::Image,
@@ -103,12 +86,25 @@ impl ThumbnailCache {
         if self.ready.contains_key(&key)
             || self.failed.contains(&key)
             || self.inflight.contains(&key)
-            || self.queue.iter().any(|(k, _)| k == &key)
+            || self.pending.iter().any(|(k, _)| k == &key)
         {
             return;
         }
-        self.queue.push_back((key, source));
-        self.pump(cx);
+        self.pending.push((key, source));
+        self.arm_flush(cx);
+    }
+
+    /// Forget everything known about `path`, so the next request re-decodes.
+    ///
+    /// For the watcher: a file edited in place keeps its path but should not
+    /// keep a stale thumbnail — and, more subtly, should not keep a stale
+    /// *failure*.
+    #[allow(dead_code, reason = "wired to the watch service in Stage 6")]
+    pub fn evict_path(&mut self, path: &std::path::Path) {
+        self.ready.retain(|k, _| k.path != path);
+        self.failed.retain(|k| k.path != path);
+        self.lru.retain(|k| k.path != path);
+        self.pending.retain(|(k, _)| k.path != path);
     }
 
     fn touch(&mut self, key: &ThumbKey) {
@@ -118,50 +114,74 @@ impl ThumbnailCache {
         self.lru.push_back(key.clone());
     }
 
-    fn pump(&mut self, cx: &mut Context<Self>) {
-        while self.active < MAX_ACTIVE {
-            let Some((key, source)) = self.queue.pop_front() else {
-                break;
-            };
-            self.inflight.insert(key.clone());
-            self.active += 1;
-            let path = key.path.clone();
-            let target = key.target;
-            cx.spawn(async move |this, cx| {
-                let decoded = cx
-                    .background_executor()
-                    .spawn(async move {
-                        match source {
-                            ThumbSource::Image => decode_thumbnail(&path, target),
-                            ThumbSource::Video => {
-                                crate::services::video_probe::poster_frame(&path, Some(target))
-                            }
-                        }
-                    })
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.finish(key, decoded);
-                    this.pump(cx);
-                    cx.notify();
-                });
-            })
-            .detach();
+    fn arm_flush(&mut self, cx: &mut Context<Self>) {
+        if self.flush_armed {
+            return;
         }
+        self.flush_armed = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FLUSH_DELAY).await;
+            let _ = this.update(cx, |this, cx| this.flush(cx));
+        })
+        .detach();
     }
 
-    fn finish(&mut self, key: ThumbKey, decoded: Option<Arc<RenderImage>>) {
-        self.inflight.remove(&key);
-        self.active = self.active.saturating_sub(1);
-        match decoded {
-            Some(img) => {
-                self.ready.insert(key.clone(), img);
-                self.touch(&key);
-                self.evict();
+    fn flush(&mut self, cx: &mut Context<Self>) {
+        self.flush_armed = false;
+        // Anything that landed while the timer ran is no longer wanted.
+        let pending = std::mem::take(&mut self.pending);
+        let mut batch: Vec<ThumbRequest> = Vec::with_capacity(pending.len());
+        for (key, source) in pending {
+            if self.ready.contains_key(&key) || self.failed.contains(&key) {
+                continue;
             }
-            None => {
-                self.failed.insert(key);
-            }
+            self.inflight.insert(key.clone());
+            batch.push(ThumbRequest { key, source });
         }
+        if batch.is_empty() {
+            self.batch = None;
+            return;
+        }
+
+        // Assigning drops the previous Inflight, which stops the superseded
+        // batch. Its keys are released when its terminal item arrives.
+        self.batch = Some(cx.backend_stream(
+            move |backend| backend.preview().thumbnails(batch),
+            |this: &mut Self, item, cx| {
+                match item {
+                    StreamItem::Batch(thumbs) => {
+                        for thumb in thumbs {
+                            this.inflight.remove(&thumb.key);
+                            match thumb.image {
+                                Some(raw) => {
+                                    this.ready
+                                        .insert(thumb.key.clone(), render_image_from_bgra(raw));
+                                    this.touch(&thumb.key);
+                                }
+                                None => {
+                                    this.failed.insert(thumb.key);
+                                }
+                            }
+                        }
+                        this.evict();
+                    }
+                    StreamItem::Progress(_) => {}
+                    StreamItem::Done(_) => {
+                        // Whatever the batch did not answer was cancelled, not
+                        // failed. Clearing the set is what lets those keys be
+                        // offered again — without it they would be wedged as
+                        // permanently in flight and their tiles would keep the
+                        // glyph forever. `dispatch` guarantees this item
+                        // arrives even if the producer dies.
+                        this.inflight.clear();
+                        if !this.pending.is_empty() {
+                            this.arm_flush(cx);
+                        }
+                    }
+                }
+                Flow::Continue
+            },
+        ));
     }
 
     fn evict(&mut self) {
@@ -174,35 +194,77 @@ impl ThumbnailCache {
     }
 }
 
-/// Decode `path` and downscale it to a `target`-edge BGRA thumbnail. Blocking;
-/// must run on the background executor. Returns `None` for anything it will not
-/// or cannot safely render (too large, decompression bomb, decode failure).
-fn decode_thumbnail(path: &Path, target: u32) -> Option<Arc<RenderImage>> {
-    let (mut file, total) = crate::storage::local().open_read(path).ok()?;
-    if total == 0 || total > THUMB_MAX_BYTES {
-        return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn key(name: &str) -> ThumbKey {
+        ThumbKey {
+            path: PathBuf::from(name),
+            mtime: 1,
+            target: THUMB_TARGET,
+        }
     }
 
-    // Header-only probe first, so a decompression bomb is refused before any
-    // pixel buffer is allocated.
-    let (w, h) = image::ImageReader::new(BufReader::new(&file))
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()?;
-    if u64::from(w) * u64::from(h) > THUMB_MAX_PIXELS {
-        return None;
+    fn blank() -> Arc<RenderImage> {
+        render_image_from_bgra(crate::backend::services::preview::content::RawImage {
+            width: 1,
+            height: 1,
+            bgra: vec![0, 0, 0, 255],
+        })
     }
 
-    // Rewind past the probe and decode the full image once.
-    file.rewind().ok()?;
-    let decoded = image::ImageReader::new(BufReader::new(file))
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?;
+    /// Eviction is the cache's one real invariant: it must stay bounded.
+    #[test]
+    fn the_cache_evicts_the_least_recently_used_past_its_cap() {
+        let mut cache = ThumbnailCache::default();
+        for i in 0..CACHE_CAP + 10 {
+            let k = key(&format!("f{i}.png"));
+            cache.ready.insert(k.clone(), blank());
+            cache.touch(&k);
+            cache.evict();
+        }
+        assert_eq!(cache.ready.len(), CACHE_CAP);
+        assert!(
+            !cache.ready.contains_key(&key("f0.png")),
+            "the oldest entry survived eviction"
+        );
+        assert!(cache.ready.contains_key(&key("f511.png")));
+    }
 
-    // `thumbnail` is a fast, aspect-preserving downscale bounded by target×target.
-    let rgba = decoded.thumbnail(target, target).into_rgba8();
-    Some(render_image_from_rgba(rgba))
+    /// A hit must move the entry to the back of the LRU, or a thumbnail that is
+    /// on screen the whole time gets evicted out from under the row showing it.
+    #[test]
+    fn a_hit_protects_an_entry_from_the_next_eviction() {
+        let mut cache = ThumbnailCache::default();
+        let hot = key("hot.png");
+        cache.ready.insert(hot.clone(), blank());
+        cache.touch(&hot);
+        for i in 0..CACHE_CAP + 5 {
+            let k = key(&format!("f{i}.png"));
+            cache.ready.insert(k.clone(), blank());
+            cache.touch(&k);
+            // Keep it warm, the way rendering its row would.
+            cache.touch(&hot);
+            cache.evict();
+        }
+        assert!(cache.ready.contains_key(&hot), "a hot entry was evicted");
+    }
+
+    #[test]
+    fn evicting_a_path_forgets_its_failure_too() {
+        let mut cache = ThumbnailCache::default();
+        let k = key("broken.png");
+        cache.failed.insert(k.clone());
+        cache.ready.insert(k.clone(), blank());
+        cache.lru.push_back(k.clone());
+        cache.evict_path(&k.path);
+        assert!(
+            !cache.failed.contains(&k),
+            "an edited file must get another chance to decode"
+        );
+        assert!(!cache.ready.contains_key(&k));
+        assert!(!cache.lru.contains(&k));
+    }
 }

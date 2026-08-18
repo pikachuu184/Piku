@@ -23,9 +23,12 @@ use gpui_component::{
 };
 
 use crate::app::assets::PikuIcon;
+use crate::backend::dispatch::BackendExt as _;
+use crate::backend::error::BackendError;
+use crate::backend::protocol::Inflight;
+use crate::backend::services::preview::PreviewRequest;
 use crate::preview::content::PreviewContent;
-use crate::preview::{PreviewKind, kind_for_path, loader};
-use crate::services::preview_cache::PreviewKey;
+use crate::preview::{PreviewKind, kind_for_path};
 use crate::state::PikuState;
 use crate::ui::media::VideoView;
 use crate::ui::media::transport;
@@ -36,7 +39,8 @@ pub struct MediaPanel {
     loaded: Option<Arc<PreviewContent>>,
     loading: bool,
     /// Staleness guard: a slow decode from an earlier file is dropped.
-    generation: u64,
+    /// The live preview request; dropping it cancels the worker.
+    preview_req: Option<Inflight>,
     /// In-app video player, created when a video file is opened (its own decode
     /// pipeline; the `loaded` content only supplies the metadata rows).
     video: Option<gpui::Entity<VideoView>>,
@@ -55,7 +59,7 @@ impl MediaPanel {
             path: None,
             loaded: None,
             loading: false,
-            generation: 0,
+            preview_req: None,
             video: None,
             _audio: audio_sub,
         }
@@ -75,52 +79,40 @@ impl MediaPanel {
         }
         self.path = Some(path.clone());
         self.loaded = None;
-        self.generation += 1;
-        let generation = self.generation;
 
         // Spin up (or tear down) the in-app video player. Dropping the old one
         // stops its decode thread; a new one begins buffering immediately.
         self.video = matches!(kind_for_path(&path), PreviewKind::VideoMeta)
             .then(|| cx.new(|cx| VideoView::new(path.clone(), cx)));
 
-        // Cache hit: reuse the decoded payload the inspector (or a previous
-        // open) already produced — no re-decode, no ffmpeg re-spawn.
-        let key = PreviewKey::for_path(&path);
-        let cache = PikuState::global(cx).preview_cache.clone();
-        if let Some(key) = &key
-            && let Some(content) = cache.update(cx, |c, _| c.get(key))
-        {
-            self.loaded = Some(content);
-            self.loading = false;
-            cx.notify();
-            return;
-        }
-
         self.loading = true;
-        let kind = kind_for_path(&path);
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_default();
-        let task = cx
-            .background_executor()
-            .spawn(async move { loader::load_preview(kind, &path, &ext) });
-        cx.spawn(async move |this, cx| {
-            let content = Arc::new(task.await);
-            let _ = this.update(cx, |this, cx| {
-                if let Some(key) = key {
-                    let cache = PikuState::global(cx).preview_cache.clone();
-                    cache.update(cx, |c, _| c.insert(key, content.clone()));
-                }
-                if this.generation == generation {
-                    this.loaded = Some(content);
-                    this.loading = false;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        let request = PreviewRequest::for_path(&path);
+        // The panel used to stat the file here, on the UI thread, purely to
+        // build a cache probe. The service now reports the key it actually read
+        // under, so that stat is gone: a miss simply decodes.
+        self.preview_req = Some(cx.backend_task_cancellable(
+            move |backend| backend.preview().preview(request),
+            move |this: &mut Self, result, cx| {
+                this.preview_req = None;
+                let content = match result {
+                    Ok(Ok(ready)) => {
+                        let content = Arc::new(PreviewContent::from(ready.payload));
+                        let cache = PikuState::global(cx).preview_cache.clone();
+                        cache.update(cx, |c, _| c.insert(ready.key, content.clone()));
+                        content
+                    }
+                    // Superseded: a newer `open` owns the panel now.
+                    Ok(Err(error)) if error.is_cancelled() => return,
+                    Err(error) if error.is_cancelled() => return,
+                    Ok(Err(error)) => Arc::new(PreviewContent::Error(
+                        BackendError::from(error).user_message().into(),
+                    )),
+                    Err(error) => Arc::new(PreviewContent::Error(error.user_message().into())),
+                };
+                this.loaded = Some(content);
+                this.loading = false;
+            },
+        ));
     }
 
     fn file_name(&self) -> SharedString {

@@ -1,7 +1,12 @@
 //! Right-dock inspector: adapts to the current selection with a
 //! provider-driven preview (see [`crate::preview`]) plus metadata rows.
-//! Decoding always happens on the background executor; a generation counter
-//! plus a (path, mtime) key guard against stale results and double loads.
+//!
+//! Decoding happens in the backend's preview service. The panel holds the
+//! request's `Inflight`; assigning a new one drops the old, which **stops** the
+//! superseded decode rather than merely discarding its answer. That is the
+//! difference from the generation counter this replaced — holding Down through
+//! a folder of videos used to run one ffmpeg subprocess per file to
+//! completion.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,11 +25,14 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::backend::dispatch::BackendExt as _;
+use crate::backend::error::BackendError;
+use crate::backend::protocol::Inflight;
+use crate::backend::services::preview::PreviewRequest;
 use crate::core::entry::{EntryKind, FsEntry};
 use crate::core::file_type::categorize;
 use crate::core::format::{format_size, format_time};
 use crate::preview::content::PreviewContent;
-use crate::preview::{decide_kind, loader};
 use crate::services::preview_cache::PreviewKey;
 use crate::state::PikuState;
 use crate::ui::components::{category_icon, empty_state};
@@ -35,8 +43,9 @@ pub struct InspectorPanel {
     pub(super) loaded: Option<LoadedPreview>,
     /// Path currently being decoded on the background executor.
     pub(super) loading_for: Option<PathBuf>,
-    /// Staleness guard: results from an older generation are dropped.
-    generation: u64,
+    /// The live preview request. Dropping it cancels the worker; assigning a
+    /// new one supersedes the old.
+    preview_req: Option<Inflight>,
     /// Ephemeral per-file view toggles (reset on every new file).
     pub(super) view: PreviewViewState,
     /// One lazily-created code editor entity, re-pointed per file.
@@ -118,7 +127,7 @@ impl InspectorPanel {
             focus_handle: cx.focus_handle(),
             loaded: None,
             loading_for: None,
-            generation: 0,
+            preview_req: None,
             view: PreviewViewState::default(),
             code_state: None,
             code_synced: None,
@@ -152,13 +161,9 @@ impl InspectorPanel {
             return;
         }
 
-        self.generation += 1;
-        let generation = self.generation;
         self.view = PreviewViewState::default();
 
-        let kind = decide_kind(&entry);
         let path = entry.path.clone();
-        let ext = entry.ext.clone();
         let mtime = entry.modified;
         let key = PreviewKey::new(path.clone(), mtime, entry.size);
 
@@ -172,33 +177,47 @@ impl InspectorPanel {
                 content,
             });
             self.loading_for = None;
+            // Nothing in flight is worth finishing now.
+            self.preview_req = None;
             return;
         }
 
         self.loading_for = Some(entry.path.clone());
-        let task = cx
-            .background_executor()
-            .spawn(async move { (loader::load_preview(kind, &path, &ext), path) });
-        cx.spawn(async move |this, cx| {
-            let (content, path) = task.await;
-            let content = Arc::new(content);
-            let _ = this.update(cx, |this, cx| {
-                // Populate the shared cache regardless of staleness, so the work
-                // is not wasted even if the selection moved on mid-decode.
-                let cache = PikuState::global(cx).preview_cache.clone();
-                cache.update(cx, |c, _| c.insert(key, content.clone()));
-                if this.generation == generation {
-                    this.loaded = Some(LoadedPreview {
-                        path,
-                        mtime,
-                        content,
-                    });
-                    this.loading_for = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        let request = PreviewRequest::for_entry(&entry);
+        // Assigning drops the previous Inflight, which cancels the worker that
+        // was decoding whatever was selected a moment ago.
+        self.preview_req = Some(cx.backend_task_cancellable(
+            move |backend| backend.preview().preview(request),
+            move |this: &mut Self, result, cx| {
+                this.preview_req = None;
+                let content = match result {
+                    Ok(Ok(ready)) => {
+                        // Cache under the key the worker actually read, not the
+                        // one guessed from a possibly-stale directory listing.
+                        let content = Arc::new(PreviewContent::from(ready.payload));
+                        let cache = PikuState::global(cx).preview_cache.clone();
+                        cache.update(cx, |c, _| c.insert(ready.key, content.clone()));
+                        content
+                    }
+                    // Superseded or shutting down: the newer request owns the
+                    // panel now, so leave its loading state alone.
+                    Ok(Err(error)) if error.is_cancelled() => return,
+                    Err(error) if error.is_cancelled() => return,
+                    // `user_message` rather than `to_string`: these embed
+                    // filenames, and a filename is attacker-controlled.
+                    Ok(Err(error)) => Arc::new(PreviewContent::Error(
+                        BackendError::from(error).user_message().into(),
+                    )),
+                    Err(error) => Arc::new(PreviewContent::Error(error.user_message().into())),
+                };
+                this.loaded = Some(LoadedPreview {
+                    path,
+                    mtime,
+                    content,
+                });
+                this.loading_for = None;
+            },
+        ));
     }
 
     pub(super) fn detail_row(

@@ -26,8 +26,11 @@ cd "$(dirname "$0")/.."
 #
 #   persistence::{load,save}_json  -> Stage 4 (PersistenceService)
 #   watcher::watch                 -> Stage 6 (WatchService)
-#   storage::open_read             -> Stage 7 (PreviewService)
-ALLOWED_UI_BLOCKING=${ALLOWED_UI_BLOCKING:-"persistence::load_json persistence::save_json watcher::watch storage::open_read"}
+#
+# storage::open_read left this list in Stage 7. Preview and thumbnail decoding
+# moved behind PreviewService, and the last straggler was not preview at all:
+# VideoPlayer::new built its audio decoder inside `cx.new` on the UI thread.
+ALLOWED_UI_BLOCKING=${ALLOWED_UI_BLOCKING:-"persistence::load_json persistence::save_json watcher::watch"}
 
 # Watcher registrations per distinct directory over an idle run. More than one
 # means the re-registration loop is back.
