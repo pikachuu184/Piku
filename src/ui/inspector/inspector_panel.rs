@@ -21,9 +21,10 @@ use gpui::{
     Styled, Subscription, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName,
+    ActiveTheme as _, Icon, IconName, Sizable as _,
     dock::{Panel, PanelControl, PanelEvent},
     input::InputState,
+    tab::{Tab, TabBar},
     v_flex,
 };
 
@@ -58,6 +59,22 @@ pub struct InspectorPanel {
     pub(super) tree_state: Option<Entity<gpui_component::tree::TreeState>>,
     /// Which file the tree currently holds, to avoid rebuilding on every render.
     pub(super) tree_synced: Option<PathBuf>,
+    /// The parsed markdown document, held as an entity rather than rebuilt.
+    ///
+    /// This is the difference between a document that scrolls and one that
+    /// does not. Handing `TextView` a state entity lets it virtualize — only
+    /// the visible blocks are laid out — where the by-value constructor lays
+    /// out *every* block of a document up to `MARKDOWN_CAP` (512 KiB) on every
+    /// single frame. Same shape as [`Self::code_state`] and [`Self::tree_state`].
+    pub(super) md_state: Option<Entity<gpui_component::text::TextViewState>>,
+    /// Which file the markdown state holds, to avoid re-setting it on render.
+    pub(super) md_synced: Option<PathBuf>,
+    /// Scroll position of the zoomed image, so zoom can keep the point under
+    /// the cursor fixed instead of drifting.
+    pub(super) pan_scroll: gpui::ScrollHandle,
+    /// Where the current pan drag was last seen. `MouseMoveEvent` carries no
+    /// delta of its own, so the difference has to be kept here.
+    pub(super) drag_from: Option<gpui::Point<Pixels>>,
     /// Which tab the inspector is showing. Deliberately **not** part of
     /// [`PreviewViewState`]: that is reset on every new file, and per-file zoom
     /// should reset while the tab the user chose should not.
@@ -95,6 +112,14 @@ impl InspectorTab {
             Self::Preview => "Preview",
             Self::Details => "Details",
             Self::Git => "Git",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Self::Preview => Icon::new(crate::app::assets::PikuIcon::Eye),
+            Self::Details => Icon::new(IconName::Info),
+            Self::Git => Icon::new(crate::app::assets::PikuIcon::GitBranch),
         }
     }
 }
@@ -194,6 +219,55 @@ pub(super) fn fit_scale(viewport: Bounds<Pixels>, dimensions: (u32, u32)) -> Opt
     Some((vw / width as f32).min(vh / height as f32))
 }
 
+impl InspectorPanel {
+    /// Step the zoom while keeping the image point under `cursor` in place.
+    ///
+    /// Without this the image appears to slide out from under the pointer as
+    /// you zoom, because the scroll container keeps its old offset while the
+    /// content grows around it. The correction is to find which point of the
+    /// image the cursor is over, then choose the offset that puts that same
+    /// point back under the cursor at the new scale:
+    ///
+    /// ```text
+    /// point      = (offset + cursor_local) / old_scale
+    /// new_offset = point * new_scale - cursor_local
+    /// ```
+    ///
+    /// GPUI's scroll offsets run negative as content moves up and left, so the
+    /// stored offset is negated on the way in and back out.
+    pub(super) fn zoom_about(
+        &mut self,
+        cursor: gpui::Point<Pixels>,
+        factor: f32,
+        fitted: Option<f32>,
+        dimensions: Option<(u32, u32)>,
+    ) {
+        let before = self.view.image_zoom.scale(fitted).unwrap_or(1.0);
+        self.view.image_zoom = self.view.image_zoom.stepped(factor, fitted);
+        let after = self.view.image_zoom.scale(fitted).unwrap_or(1.0);
+
+        // Fitted mode centres the image itself, so there is no offset to keep.
+        let Some(dimensions) = dimensions else { return };
+        let (before, after) = (
+            super::preview_view::effective_scale(before, dimensions),
+            super::preview_view::effective_scale(after, dimensions),
+        );
+        if before <= 0.0 || after <= 0.0 || before == after {
+            return;
+        }
+
+        let viewport = self.preview_viewport.get();
+        let local = cursor - viewport.origin;
+        let offset = self.pan_scroll.offset();
+        let point_x = (f32::from(local.x) - f32::from(offset.x)) / before;
+        let point_y = (f32::from(local.y) - f32::from(offset.y)) / before;
+        self.pan_scroll.set_offset(gpui::point(
+            px(f32::from(local.x) - point_x * after),
+            px(f32::from(local.y) - point_y * after),
+        ));
+    }
+}
+
 /// Identity of the text the shared code editor was last synced with.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct CodeSyncKey {
@@ -229,6 +303,10 @@ impl InspectorPanel {
             code_synced: None,
             tree_state: None,
             tree_synced: None,
+            md_state: None,
+            md_synced: None,
+            pan_scroll: gpui::ScrollHandle::new(),
+            drag_from: None,
             tab: InspectorTab::default(),
             preview_viewport: Rc::new(Cell::new(Bounds::default())),
             git: super::git_view::GitViewState::default(),
@@ -259,6 +337,13 @@ impl InspectorPanel {
         }
 
         self.view = PreviewViewState::default();
+        // Drop the previous document rather than re-pointing it: `TextViewState`
+        // owns a scroll position as well as the parsed blocks, and inheriting
+        // the last file's scroll offset would open the next one part-way down.
+        self.md_state = None;
+        self.md_synced = None;
+        self.pan_scroll = gpui::ScrollHandle::new();
+        self.drag_from = None;
 
         let path = entry.path.clone();
         let mtime = entry.modified;
@@ -561,58 +646,63 @@ impl InspectorPanel {
             )
     }
 
-    /// Preview ⇄ Details ⇄ Git. Git only appears inside a repository; the other
-    /// two are always present, so the bar never changes width as you move
-    /// between files.
+    /// Preview ⇄ Details ⇄ Git, with the active preview's own controls on the
+    /// right of the same row.
+    ///
+    /// Git only appears inside a repository; the other two are always present,
+    /// so the bar never changes shape as you move between files. The controls
+    /// go in `TabBar`'s suffix, which renders after the tab list with the empty
+    /// space between — so they sit right-aligned, in one row, wherever they
+    /// came from. That is why no preview block draws a control strip of its own
+    /// any more.
     fn render_tab_bar(&self, in_repo: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let tab = |target: InspectorTab, icon: Icon, active: bool| {
-            gpui_component::h_flex()
-                .id(target.label())
-                .px_2()
-                .py_0p5()
-                .gap_1()
-                .items_center()
-                .text_xs()
-                .rounded(cx.theme().radius)
-                .cursor_pointer()
-                .when(active, |s| {
-                    s.bg(cx.theme().list_active)
-                        .text_color(cx.theme().foreground)
-                })
-                .when(!active, |s| {
-                    s.text_color(cx.theme().muted_foreground)
-                        .hover(|s| s.bg(cx.theme().list_hover))
-                })
-                .child(icon.size(px(12.)))
-                .child(target.label())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.tab = target;
-                    cx.notify();
-                }))
-        };
+        let order = self.tab_order(in_repo);
+        let selected = order.iter().position(|t| *t == self.tab).unwrap_or(0);
+        let actions = super::preview_view::preview_actions(self, cx);
 
-        gpui_component::h_flex()
+        let mut bar = TabBar::new("inspector-tabs")
+            .segmented()
+            .small()
+            .selected_index(selected)
+            .on_click({
+                let order = order.clone();
+                cx.listener(move |this, index: &usize, _, cx| {
+                    if let Some(tab) = order.get(*index) {
+                        this.tab = *tab;
+                        cx.notify();
+                    }
+                })
+            });
+        for tab in &order {
+            // The icon goes in `prefix`, not `icon`: `Tab` renders icon *or*
+            // label, never both, so `.icon()` would silently drop the name and
+            // leave three unlabelled glyphs. `prefix` renders beside the label.
+            bar = bar.child(
+                Tab::new()
+                    .prefix(
+                        tab.icon()
+                            .size(px(12.))
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .label(tab.label()),
+            );
+        }
+
+        div()
             .flex_none()
-            .gap_1()
             .px_3()
-            .py_2()
-            .child(tab(
-                InspectorTab::Preview,
-                Icon::new(crate::app::assets::PikuIcon::Eye),
-                self.tab == InspectorTab::Preview,
-            ))
-            .child(tab(
-                InspectorTab::Details,
-                Icon::new(IconName::Info),
-                self.tab == InspectorTab::Details,
-            ))
-            .when(in_repo, |bar| {
-                bar.child(tab(
-                    InspectorTab::Git,
-                    Icon::new(crate::app::assets::PikuIcon::GitBranch),
-                    self.tab == InspectorTab::Git,
-                ))
-            })
+            .pb_2()
+            .child(bar.when_some(actions, |bar, actions| bar.suffix(actions)))
+    }
+
+    /// The tabs on offer, in bar order. One list so the rendered order and the
+    /// index the click handler resolves cannot disagree.
+    fn tab_order(&self, in_repo: bool) -> Vec<InspectorTab> {
+        let mut order = vec![InspectorTab::Preview, InspectorTab::Details];
+        if in_repo {
+            order.push(InspectorTab::Git);
+        }
+        order
     }
 }
 
