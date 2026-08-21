@@ -37,6 +37,20 @@ in a document you merely looked at is in scope.
 strict header probe, strict per-axis dimension limits, and an allocation budget, all applied before
 any pixel buffer exists. Documents nested deeply enough to overflow the parser's stack are refused
 before parsing rather than caught afterwards, because a stack overflow aborts and cannot be caught.
+Decoded previews are held in a cache bounded by a byte budget as well as an entry count, and an
+image is billed the real size of its pixel buffer — an estimate that under-counts is the same bug
+as no budget at all.
+
+### A known boundary: SVG
+
+SVG is the one preview whose bytes PIKU does not parse. The `image` crate cannot rasterize it, so
+the renderer does, which means neither the decode budget nor the per-axis dimension limits apply to
+it — those bound *our* decoder, and our decoder never runs. What PIKU does enforce is the same
+refusals every other provider gets — a symlink is never followed, a fifo or device node is never
+opened — plus a file-size gate, since size is the only bound left on work we do not perform. The
+rasterizer's own resource use is not something this codebase limits. Reports of an SVG that hangs
+or exhausts the renderer are in scope and interesting; they are just not a check we can currently
+place in front of it.
 
 **Superseded work stops.** Selecting a different file cancels the previous preview, including any
 subprocess it started. A report that some operation keeps running, or keeps a subprocess alive after

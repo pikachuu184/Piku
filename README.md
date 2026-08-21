@@ -31,9 +31,14 @@ stay responsive on multi-gigabyte directories.
 - **Tabbed, splittable workspaces** — independent per-tab sessions (folder, history, sort, zoom,
   filter, search, selection), horizontal and vertical splits, and named workspaces that persist
   across restarts.
-- **Preview engine** — images (fit / 1:1 / zoom, transparency checkerboard), PDF pages, syntax-
-  highlighted source, JSON/YAML/TOML as a collapsible tree, archive listings, and a hex fallback for
-  anything unknown.
+- **Preview / Details inspector** — one panel, one shell: a header naming the selection, then
+  **Preview**, **Details**, and (inside a repository) **Git**. The tab you chose survives moving
+  between files, so arrowing down a folder changes the content and nothing else.
+- **Preview engine** — the Preview tab is full-bleed: every preview takes the panel's whole height
+  and width. Images (fit / 1:1 / continuous zoom, transparency checkerboard) with a live scale
+  readout that says when magnification has outrun the decoded buffer, PDF pages, syntax-highlighted
+  source, JSON/YAML/TOML as a collapsible tree, archive listings, and a hex fallback for anything
+  unknown.
 - **Media player** — an interactive waveform scrubber, volume and mute, and icon transport controls,
   plus a persistent bottom playback bar and a dockable media panel. Video shows a poster frame and
   opens in your system player.

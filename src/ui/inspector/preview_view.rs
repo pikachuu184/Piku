@@ -1,15 +1,32 @@
-//! Renders [`PreviewContent`] into the inspector's preview box.
+//! Renders [`PreviewContent`] into the inspector's Preview tab.
+//!
+//! Every block here is handed a **real bounded box** — the tab is
+//! `flex_1().min_h_0()` and, unlike the Details tab, is not wrapped in a scroll
+//! container. So `size_full()` means the panel, and a block sizes itself one of
+//! two ways:
+//!
+//! - **Fills**: image, code, structured tree, video poster. `flex_1().min_h_0()`
+//!   for the content, `flex_none` for any toolbar or banner above or below it.
+//! - **Scrolls**: hex rows, archive listings, media metadata, PDF pages, diffs.
+//!   These are as tall as their content, so [`scroll_fill`] gives them the
+//!   scroll container and the padding the tab itself does not provide.
+//!
+//! There is deliberately no `fill_height(window)`-style guess any more. Deriving
+//! a height from the window was wrong by the height of the media bar whenever
+//! something was playing; the tab measures its own box instead.
 //!
 //! Theme adherence rules for every surface in this file:
 //! - only `cx.theme().*` tokens (plus the named grays in `theme/monochrome.rs`)
-//! - every preview surface is `.rounded(cx.theme().radius)` on `muted`
+//! - filling surfaces run edge to edge and are therefore **not** rounded — a
+//!   radius against the panel edge reads as a seam. Surfaces inside a scrolling
+//!   block keep `.rounded(cx.theme().radius)` on `muted`.
 //! - monospace via `.font_family("monospace")`, sizes `text_xs`/`text_sm` only
 //! - no shadows, no new hex values outside `monochrome.rs`
 
 use gpui::{
     AnyElement, AppContext as _, Context, ImageSource, InteractiveElement as _, IntoElement,
     ObjectFit, ParentElement, RenderImage, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled, StyledImage as _, Window, canvas, div, img,
+    StatefulInteractiveElement as _, Styled, StyledImage as _, Window, div, img,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
@@ -26,9 +43,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::app::assets::PikuIcon;
+use crate::backend::services::preview::providers::image::PREVIEW_MAX_EDGE;
 use crate::core::format::format_size;
 use crate::preview::content::{ArchiveItem, HexRow, PreviewContent, PreviewImage};
-use crate::ui::inspector::inspector_panel::{CodeSyncKey, InspectorPanel};
+use crate::ui::inspector::inspector_panel::{CodeSyncKey, ImageZoom, InspectorPanel, fit_scale};
 
 /// Archive listings render at most this many rows (the loader already caps
 /// what it reads; this caps what the non-virtualized panel draws).
@@ -54,8 +72,7 @@ pub(super) fn render_preview_box(
             truncated,
             total_size,
         } => v_flex()
-            .w_full()
-            .gap_1()
+            .size_full()
             .when_truncated(*truncated, text.len(), *total_size, cx)
             .child(code_editor_block(
                 panel,
@@ -91,12 +108,20 @@ pub(super) fn render_preview_box(
             entries,
             total_count,
             truncated,
-        } => archive_block(entries, *total_count, *truncated, cx),
+        } => scroll_fill(
+            "pv-archive-scroll",
+            archive_block(entries, *total_count, *truncated, cx),
+            cx,
+        ),
         PreviewContent::Audio {
             rows,
             waveform,
             duration_ms,
-        } => audio_block(&loaded.path, rows, waveform, *duration_ms, cx),
+        } => scroll_fill(
+            "pv-audio-scroll",
+            audio_block(&loaded.path, rows, waveform, *duration_ms, cx),
+            cx,
+        ),
         PreviewContent::Video { rows, poster } => {
             video_block(&loaded.path, rows, poster.clone(), cx)
         }
@@ -104,16 +129,20 @@ pub(super) fn render_preview_box(
             pages,
             total_pages,
             note,
-        } => pdf_block(pages, *total_pages, note.as_ref(), window, cx),
+        } => pdf_block(panel, pages, *total_pages, note.as_ref(), cx),
         PreviewContent::Hex {
             rows,
             signature,
             total_size,
-        } => hex_block(rows, *signature, *total_size, cx),
+        } => scroll_fill(
+            "pv-hex-scroll",
+            hex_block(rows, *signature, *total_size, cx),
+            cx,
+        ),
         PreviewContent::TooLarge { size } => {
             message_box(format!("Too large to preview ({})", format_size(*size)), cx)
         }
-        PreviewContent::Diff(payload) => diff_block(payload, cx),
+        PreviewContent::Diff(payload) => scroll_fill("pv-diff-scroll", diff_block(payload, cx), cx),
         PreviewContent::Error(message) => message_box(message.to_string(), cx),
     };
     panel.loaded = Some(loaded);
@@ -121,15 +150,6 @@ pub(super) fn render_preview_box(
 }
 
 // -- Code / text ------------------------------------------------------------
-
-/// Height for "reading surfaces" (code, structured trees, PDFs, hex): fill
-/// the inspector's visible area instead of a small fixed box, so documents
-/// read at full height. Derived from the window because the preview sits in
-/// a natural-height scroll column; the floor keeps tiny windows usable.
-/// (Chrome overhead: title bar + mode toggle + paddings + status bar.)
-fn fill_height(window: &Window) -> gpui::Pixels {
-    (window.viewport_size().height - px(180.)).max(px(320.))
-}
 
 /// Lazily create the shared read-only code editor and sync it with `text`
 /// when the (path, variant) key changed since the last render.
@@ -163,12 +183,34 @@ fn code_editor_block(
         panel.code_synced = Some(key);
     }
 
+    // `flex_1().min_h_0()`, not an explicit height. The Preview tab hands this
+    // a real bounded box, so "the rest of the column" is a height the layout
+    // can resolve — which is what replaced deriving one from the window size.
     div()
+        .flex_1()
+        .min_h_0()
         .w_full()
-        .h(fill_height(window))
-        .rounded(cx.theme().radius)
         .overflow_hidden()
         .child(Input::new(&state).disabled(true).h_full().w_full())
+        .into_any_element()
+}
+
+/// Wrap a natural-height block so it fills the Preview tab and scrolls if it
+/// overflows.
+///
+/// Some previews have a height of their own (an image fills; a code editor
+/// fills) and some are lists that are as tall as their content (hex rows, an
+/// archive listing, media metadata). The second kind needs the scroll container
+/// the tab deliberately does not provide, plus the padding the tab deliberately
+/// drops so filling previews can run edge to edge.
+fn scroll_fill(id: &'static str, content: AnyElement, cx: &Context<InspectorPanel>) -> AnyElement {
+    div()
+        .id(id)
+        .size_full()
+        .overflow_y_scroll()
+        .p_3()
+        .bg(cx.theme().sidebar)
+        .child(content)
         .into_any_element()
 }
 
@@ -217,20 +259,23 @@ fn markdown_block(
             cx,
         )
     } else {
+        // A rendered document is as tall as its content, so it gets the scroll
+        // container rather than being pinned to the viewport and clipped.
         div()
+            .id("pv-md-scroll")
+            .flex_1()
+            .min_h_0()
             .w_full()
+            .overflow_y_scroll()
             .p_2()
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().muted)
             .text_sm()
             .child(TextView::markdown("pv-md", source.clone()))
             .into_any_element()
     };
 
     v_flex()
-        .w_full()
-        .gap_1()
-        .child(toggle)
+        .size_full()
+        .child(div().flex_none().px_2().pt_2().child(toggle))
         .when_truncated(truncated, source.len(), 0, cx)
         .child(body)
         .into_any_element()
@@ -308,14 +353,14 @@ fn structured_block(
         ));
     }
 
-    let mut column = v_flex().w_full().gap_1();
+    let mut column = v_flex().size_full();
     if tree_capable || pretty.is_some() {
-        column = column.child(toggles);
+        column = column.child(div().flex_none().px_2().pt_2().child(toggles));
     }
 
     if tree_active {
         return column
-            .child(structured_tree_block(panel, path, text, &ext, window, cx))
+            .child(structured_tree_block(panel, path, text, &ext, cx))
             .into_any_element();
     }
 
@@ -349,7 +394,6 @@ fn structured_tree_block(
     path: &Path,
     text: &SharedString,
     ext: &str,
-    window: &Window,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
     // Rebuild only when the file changed, so expand/collapse state survives
@@ -376,9 +420,9 @@ fn structured_tree_block(
     };
 
     div()
+        .flex_1()
+        .min_h_0()
         .w_full()
-        .h(fill_height(window))
-        .rounded(cx.theme().radius)
         .bg(cx.theme().muted)
         .overflow_hidden()
         .child(tree(&state, |ix, entry, selected, _window, _cx| {
@@ -471,8 +515,18 @@ fn image_block(
     dimensions: Option<(u32, u32)>,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
-    let fit = panel.view.image_fit || dimensions.is_none();
-    let zoom = panel.view.image_zoom;
+    // SVG has no pixel size of its own, so there is nothing to be 1:1 *with*;
+    // it stays fitted and the renderer rasterizes it at whatever size it lands.
+    let sizeable = dimensions.is_some();
+    let zoom = if sizeable {
+        panel.view.image_zoom
+    } else {
+        ImageZoom::Fit
+    };
+    // Measured last frame. `None` on the very first frame for a given panel
+    // size — which is exactly why fitted mode does not depend on it.
+    let fitted = dimensions.and_then(|d| fit_scale(panel.preview_viewport.get(), d));
+
     // A path clone or an `Arc` bump. Never a re-read, and never a re-decode:
     // for anything but SVG the pixels were decoded on a worker, with the
     // orientation already applied.
@@ -481,7 +535,11 @@ fn image_block(
         PreviewImage::Decoded(frame) => ImageSource::Render(frame.clone()),
     };
 
-    let content: AnyElement = if fit {
+    let content: AnyElement = if zoom.is_fit() {
+        // Fitted mode is the renderer's own `Contain`, not a scale we compute.
+        // It needs no measurement, so it is correct on the first frame and
+        // stays correct while the dock is being dragged — a computed scale
+        // would be one frame behind for the whole drag.
         div()
             .absolute()
             .inset_0()
@@ -500,6 +558,7 @@ fn image_block(
         // 1:1 / zoomed: explicit size inside a scrollable viewport — panning
         // comes free from the scroll container.
         let (w, h) = dimensions.unwrap_or((0, 0));
+        let scale = zoom.scale(fitted).unwrap_or(1.0);
         div()
             .absolute()
             .inset_0()
@@ -508,29 +567,41 @@ fn image_block(
             .overflow_y_scroll()
             .child(
                 img(source.clone())
-                    .w(px(w as f32 * zoom))
-                    .h(px(h as f32 * zoom))
+                    .w(px(w as f32 * scale))
+                    .h(px(h as f32 * scale))
                     .flex_none(),
             )
             .into_any_element()
     };
 
-    let sizeable = dimensions.is_some();
     let viewport = div()
         .relative()
+        .flex_1()
+        .min_h_0()
         .w_full()
-        .h(px(240.))
-        .rounded(cx.theme().radius)
-        .bg(cx.theme().muted)
+        // The transparency backdrop, in the same two monochrome grays as
+        // before. This used to be a hand-painted canvas whose loop was capped
+        // at 120 cells per axis — 960 px, which never mattered while the box
+        // was a fixed 240 px tall and would have left the bottom of a
+        // full-height panel flat. GPUI's checkerboard is a background pattern:
+        // no cell count to cap, and one draw instead of 14 400 quads.
+        //
+        // The shader paints its colour on alternating cells and leaves the
+        // rest transparent, so the two grays are two layers — the base here,
+        // the pattern over it.
+        .bg(crate::theme::solid(crate::theme::CHECKER_A))
         .overflow_hidden()
-        .child(div().absolute().inset_0().child(checkerboard()))
+        .child(div().absolute().inset_0().bg(gpui::checkerboard(
+            crate::theme::solid(crate::theme::CHECKER_B),
+            CHECKER_CELL_PX,
+        )))
         .child(content)
         // Wheel zoom: active when zoomed in (1:1 mode) or with Ctrl held while
         // fitted, so plain scrolling still pans a zoomed image. Only meaningful
         // when the pixel dimensions are known (needed to size the 1:1 image).
         .when(sizeable, |el| {
-            el.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                if !(event.modifiers.control || this.view.image_fit) {
+            el.on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+                if !(event.modifiers.control || this.view.image_zoom.is_fit()) {
                     return;
                 }
                 let dy = event.delta.pixel_delta(px(16.)).y;
@@ -538,23 +609,26 @@ fn image_block(
                     return;
                 }
                 let factor = if dy > px(0.) { 1.25 } else { 0.8 };
-                this.view.image_fit = false;
-                this.view.image_zoom = (this.view.image_zoom * factor).clamp(0.1, 8.0);
+                this.view.image_zoom = this.view.image_zoom.stepped(factor, fitted);
                 cx.notify();
             }))
         });
+
     let mut controls = h_flex()
+        .flex_none()
         .gap_1()
         .items_center()
+        .px_2()
+        .py_1()
         .child(
             Button::new("pv-img-fit")
                 .ghost()
                 .xsmall()
                 .icon(PikuIcon::Maximize)
                 .tooltip("Fit to window")
-                .selected(fit)
+                .selected(zoom.is_fit())
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.view.image_fit = true;
+                    this.view.image_zoom = ImageZoom::Fit;
                     cx.notify();
                 })),
         )
@@ -564,11 +638,10 @@ fn image_block(
                 .xsmall()
                 .icon(PikuIcon::Scan)
                 .tooltip("Actual size (1:1)")
-                .selected(!fit)
+                .selected(zoom == ImageZoom::Actual)
                 .disabled(!sizeable)
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.view.image_fit = false;
-                    this.view.image_zoom = 1.0;
+                    this.view.image_zoom = ImageZoom::Actual;
                     cx.notify();
                 })),
         )
@@ -579,9 +652,8 @@ fn image_block(
                 .icon(PikuIcon::ZoomOut)
                 .tooltip("Zoom out")
                 .disabled(!sizeable)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.view.image_fit = false;
-                    this.view.image_zoom = (this.view.image_zoom * 0.8).clamp(0.1, 8.0);
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.view.image_zoom = this.view.image_zoom.stepped(0.8, fitted);
                     cx.notify();
                 })),
         )
@@ -592,18 +664,25 @@ fn image_block(
                 .icon(PikuIcon::ZoomIn)
                 .tooltip("Zoom in")
                 .disabled(!sizeable)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.view.image_fit = false;
-                    this.view.image_zoom = (this.view.image_zoom * 1.25).clamp(0.1, 8.0);
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.view.image_zoom = this.view.image_zoom.stepped(1.25, fitted);
                     cx.notify();
                 })),
         );
     if let Some((w, h)) = dimensions {
-        let label = if fit {
-            format!("{w} × {h}")
-        } else {
-            format!("{w} × {h} · {:.0}%", zoom * 100.0)
+        // The scale now has a number in *both* modes, because fitted resolves
+        // against the measured viewport. Before, fitted simply had no readout.
+        let mut label = match zoom.scale(fitted) {
+            Some(scale) => format!("{w} × {h} · {:.0}%", scale * 100.0),
+            None => format!("{w} × {h}"),
         };
+        if zoom_is_resolution_limited(zoom.scale(fitted), (w, h)) {
+            // Say so rather than quietly showing a soft image. The preview
+            // buffer is capped at PREVIEW_MAX_EDGE for the cache's sake, so
+            // past this point magnification is stretching decoded pixels, not
+            // revealing source ones.
+            label.push_str(" · limited");
+        }
         controls = controls.child(
             div()
                 .ml_auto()
@@ -614,46 +693,39 @@ fn image_block(
     }
 
     v_flex()
-        .w_full()
-        .gap_1()
+        .size_full()
         .child(viewport)
         .child(controls)
         .into_any_element()
 }
 
-/// Transparency backdrop painted directly — two grays from the monochrome
-/// palette, 8px cells, bounded iteration.
-fn checkerboard() -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        |bounds, _, window, _| {
-            const CELL: f32 = 8.0;
-            let base = crate::theme::solid(crate::theme::CHECKER_A);
-            let alt = crate::theme::solid(crate::theme::CHECKER_B);
-            window.paint_quad(gpui::fill(bounds, base));
-            let cols = ((f32::from(bounds.size.width) / CELL).ceil() as usize).min(120);
-            let rows = ((f32::from(bounds.size.height) / CELL).ceil() as usize).min(120);
-            for row in 0..rows {
-                for col in 0..cols {
-                    if (row + col) % 2 == 0 {
-                        continue;
-                    }
-                    let origin = gpui::point(
-                        bounds.origin.x + px(col as f32 * CELL),
-                        bounds.origin.y + px(row as f32 * CELL),
-                    );
-                    window.paint_quad(gpui::fill(
-                        gpui::Bounds {
-                            origin,
-                            size: gpui::size(px(CELL), px(CELL)),
-                        },
-                        alt,
-                    ));
-                }
-            }
-        },
-    )
-    .size_full()
+/// Checkerboard cell size, in pixels.
+const CHECKER_CELL_PX: f32 = 8.0;
+
+/// Whether the displayed scale is asking for more source pixels than the
+/// preview buffer actually holds.
+///
+/// The buffer's longest edge is capped at `PREVIEW_MAX_EDGE` so one image
+/// cannot evict the whole preview cache. An image larger than that is decoded
+/// downscaled, and `dimensions` reports the *source* size — so "100 %" on a
+/// 6000 px photo is already a 2048 px buffer stretched threefold. A 240 px box
+/// hid that; a full-height panel does not.
+///
+/// This is specifically about detail the *file* has and the preview does not.
+/// Magnifying a small image past 100 % is ordinary upscaling — the file has no
+/// more detail either, so there is nothing to warn about, and saying otherwise
+/// would put the marker on every tiny icon the moment it was fitted.
+fn zoom_is_resolution_limited(scale: Option<f32>, dimensions: (u32, u32)) -> bool {
+    let Some(scale) = scale else {
+        return false;
+    };
+    let longest = dimensions.0.max(dimensions.1);
+    if longest <= PREVIEW_MAX_EDGE {
+        return false;
+    }
+    // The buffer holds `PREVIEW_MAX_EDGE` pixels across a source that is
+    // `longest` wide, so it runs out at that ratio.
+    scale > PREVIEW_MAX_EDGE as f32 / longest as f32
 }
 
 // -- Hex / archive / media --------------------------------------------------
@@ -847,14 +919,16 @@ fn video_block(
     poster: Option<Arc<RenderImage>>,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
-    let mut column = v_flex().w_full().gap_2();
+    let mut column = v_flex().size_full();
     if let Some(image) = poster {
+        // The poster takes the room the metadata does not, rather than a fixed
+        // 240 px — a video preview is mostly the frame.
         column = column.child(
             div()
                 .relative()
+                .flex_1()
+                .min_h_0()
                 .w_full()
-                .h(px(240.))
-                .rounded(cx.theme().radius)
                 .bg(cx.theme().muted)
                 .overflow_hidden()
                 .child(
@@ -876,7 +950,7 @@ fn video_block(
     let path_buf = path.to_path_buf();
     column
         .child(
-            h_flex().gap_1().child(
+            h_flex().flex_none().gap_1().px_2().pt_2().child(
                 Button::new("pv-video-open")
                     .ghost()
                     .xsmall()
@@ -896,18 +970,35 @@ fn video_block(
                     })),
             ),
         )
-        .child(open_in_panel_button("pv-video-pop", path, cx))
-        .child(media_block(rows, cx))
+        .child(
+            div()
+                .flex_none()
+                .px_2()
+                .child(open_in_panel_button("pv-video-pop", path, cx)),
+        )
+        .child(
+            div()
+                .id("pv-video-meta")
+                .flex_none()
+                .max_h(px(180.))
+                .overflow_y_scroll()
+                .p_2()
+                .child(media_block(rows, cx)),
+        )
         .into_any_element()
 }
 
 // -- PDF --------------------------------------------------------------------
 
+/// Minimum height for a PDF page before the viewport has been measured. Only
+/// ever used for the first frame after the tab opens.
+const PDF_PAGE_MIN_HEIGHT: f32 = 320.0;
+
 fn pdf_block(
+    panel: &InspectorPanel,
     pages: &[Arc<RenderImage>],
     total_pages: usize,
     note: Option<&SharedString>,
-    window: &Window,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
     if pages.is_empty() {
@@ -916,6 +1007,12 @@ fn pdf_block(
             .unwrap_or_else(|| "No preview available.".to_string());
         return message_box(message, cx);
     }
+
+    // A page is as tall as the tab, so scrolling moves one page at a time.
+    // Measured, not guessed: the old version subtracted a hard-coded 180 px of
+    // "chrome" from the whole window, which was wrong by exactly the height of
+    // the media bar whenever something was playing.
+    let page_height = f32::from(panel.preview_viewport.get().size.height).max(PDF_PAGE_MIN_HEIGHT);
 
     let mut column = v_flex().w_full().gap_2().child(
         div()
@@ -926,14 +1023,11 @@ fn pdf_block(
                 if total_pages == 1 { "" } else { "s" }
             )),
     );
-    // Pages stack vertically; the inspector's outer scroll container walks them.
     for page in pages {
         column = column.child(
             div()
                 .w_full()
-                // Each page fills the inspector's visible height; the outer
-                // scroll container pages through them.
-                .h(fill_height(window))
+                .h(px(page_height))
                 .rounded(cx.theme().radius)
                 .bg(cx.theme().muted)
                 .overflow_hidden()
@@ -956,7 +1050,8 @@ fn pdf_block(
                 .child(note.clone()),
         );
     }
-    column.into_any_element()
+    // Pages stack vertically and this walks them.
+    scroll_fill("pv-pdf-scroll", column.into_any_element(), cx)
 }
 
 fn media_block(rows: &[(SharedString, SharedString)], cx: &Context<InspectorPanel>) -> AnyElement {
@@ -1071,13 +1166,11 @@ pub(super) fn diff_block(
 
 fn message_box(message: String, cx: &Context<InspectorPanel>) -> AnyElement {
     div()
-        .w_full()
-        .h(px(120.))
+        .size_full()
         .p_2()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(cx.theme().radius)
         .bg(cx.theme().muted)
         .child(
             div()
@@ -1138,3 +1231,35 @@ trait TruncatedExt: Sized + ParentElement {
 }
 
 impl TruncatedExt for gpui::Div {}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    /// An image small enough to be decoded whole is never "limited": the
+    /// preview holds every pixel the file does.
+    #[test]
+    fn an_undownscaled_image_is_never_resolution_limited() {
+        assert!(!zoom_is_resolution_limited(Some(0.5), (800, 600)));
+        assert!(!zoom_is_resolution_limited(Some(1.0), (800, 600)));
+        // Even a 16px icon fitted to a big panel, which is a large scale.
+        assert!(!zoom_is_resolution_limited(Some(40.0), (16, 16)));
+    }
+
+    /// A photo past the decode cap is limited exactly when magnification
+    /// outruns the buffer, not before.
+    #[test]
+    fn a_downscaled_photo_is_limited_past_the_buffer_ratio() {
+        let dims = (PREVIEW_MAX_EDGE * 3, PREVIEW_MAX_EDGE * 2);
+        // The buffer covers a third of the source, so up to 1/3 scale is exact.
+        assert!(!zoom_is_resolution_limited(Some(0.3), dims));
+        assert!(zoom_is_resolution_limited(Some(0.4), dims));
+        assert!(zoom_is_resolution_limited(Some(1.0), dims));
+    }
+
+    /// No measured viewport means no number to judge, so no claim either way.
+    #[test]
+    fn an_unmeasured_viewport_makes_no_claim() {
+        assert!(!zoom_is_resolution_limited(None, (9000, 9000)));
+    }
+}
