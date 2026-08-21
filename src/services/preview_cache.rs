@@ -17,7 +17,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use crate::preview::content::PreviewContent;
+use crate::preview::content::{PreviewContent, PreviewImage};
 
 /// The key is defined by the service, not here, and the service echoes back the
 /// one it actually read under. That is what lets the media panel probe the cache
@@ -33,10 +33,10 @@ const CACHE_CAP: usize = 24;
 /// [`CACHE_CAP`] hold.
 const BYTE_BUDGET: usize = 96 * 1024 * 1024;
 
-/// Flat per-image estimate used only for eviction accounting. Real decoded
-/// images vary, but a conservative constant keeps the cache honestly bounded
-/// without depending on any RenderImage internals.
-const IMAGE_BYTES_EST: usize = 8 * 1024 * 1024;
+/// Floor charged to any resident entry, so a cache full of tiny payloads still
+/// accounts for its own bookkeeping (the key's path, the LRU slot) rather than
+/// appearing free.
+const SMALL_PAYLOAD_EST: usize = 4 * 1024;
 
 #[derive(Default)]
 pub struct PreviewCache {
@@ -104,18 +104,50 @@ fn cacheable(content: &PreviewContent) -> bool {
 /// A conservative resident-size estimate, used only for eviction accounting.
 fn estimated_bytes(content: &PreviewContent) -> usize {
     match content {
+        // An image preview is a *decoded* frame, not a path. It stopped being a
+        // path when the decode moved to the worker so the grid and the
+        // inspector could share one buffer with one set of limits — but this
+        // arm kept billing it as metadata, at 4 KiB against a 96 MiB budget.
+        // That left `CACHE_CAP` as the only real bound on image memory, which
+        // at a 2048-px edge is roughly 384 MiB: four times the budget this
+        // module exists to enforce. Bill the buffer.
+        PreviewContent::Image { source, .. } => image_bytes(source),
         PreviewContent::Video {
-            poster: Some(_), ..
-        } => IMAGE_BYTES_EST,
-        PreviewContent::Pdf { pages, .. } => pages.len() * IMAGE_BYTES_EST,
+            poster: Some(poster),
+            ..
+        } => render_image_bytes(poster),
+        PreviewContent::Pdf { pages, .. } => pages.iter().map(render_image_bytes).sum(),
         PreviewContent::Code { text, .. }
         | PreviewContent::Markdown { source: text, .. }
         | PreviewContent::Structured { text, .. } => text.len(),
         PreviewContent::Audio { waveform, .. } => waveform.len() * 4,
-        // Image content is just a path + dimensions (gpui decodes lazily);
-        // everything else is small metadata.
-        _ => 4 * 1024,
+        // Everything else is small metadata.
+        _ => SMALL_PAYLOAD_EST,
     }
+}
+
+/// Resident bytes for a preview image.
+fn image_bytes(source: &PreviewImage) -> usize {
+    match source {
+        // SVG really is just a path — the renderer rasterizes it itself, and
+        // whatever it caches is the renderer's own accounting, not ours.
+        PreviewImage::Path(_) => SMALL_PAYLOAD_EST,
+        PreviewImage::Decoded(frame) => render_image_bytes(frame),
+    }
+}
+
+/// Resident bytes for a decoded frame: four channels at one byte each.
+///
+/// `size()` is public API, so this does not depend on `RenderImage` internals —
+/// which is what the flat constant was avoiding, at the cost of being wrong.
+fn render_image_bytes(frame: &Arc<gpui::RenderImage>) -> usize {
+    let size = frame.size(0);
+    let width = u32::from(size.width) as usize;
+    let height = u32::from(size.height) as usize;
+    width
+        .saturating_mul(height)
+        .saturating_mul(4)
+        .max(SMALL_PAYLOAD_EST)
 }
 
 #[cfg(test)]
@@ -138,6 +170,68 @@ mod tests {
             Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime)),
             1,
         )
+    }
+
+    /// A decoded image preview of `edge × edge` pixels.
+    fn decoded_image(edge: u32) -> Arc<PreviewContent> {
+        let raw = crate::backend::services::preview::content::RawImage {
+            width: edge,
+            height: edge,
+            bgra: vec![0u8; (edge as usize) * (edge as usize) * 4],
+        };
+        Arc::new(PreviewContent::Image {
+            source: PreviewImage::Decoded(crate::preview::image_util::render_image_from_bgra(raw)),
+            dimensions: Some((edge, edge)),
+        })
+    }
+
+    /// The defect this replaced: a decoded frame was billed as metadata, so
+    /// `CACHE_CAP` was the only bound on image memory and the byte budget —
+    /// the thing this module exists for — never fired for the payload that
+    /// actually needs it.
+    #[test]
+    fn a_decoded_image_is_billed_its_real_buffer_size() {
+        let edge = 256;
+        let expected = (edge as usize) * (edge as usize) * 4;
+        assert_eq!(estimated_bytes(&decoded_image(edge)), expected);
+    }
+
+    /// SVG is the one image that really is just a path: the renderer rasterizes
+    /// it, so there is no buffer of ours to bill.
+    #[test]
+    fn an_svg_preview_is_billed_as_metadata() {
+        let content = Arc::new(PreviewContent::Image {
+            source: PreviewImage::Path(std::path::PathBuf::from("logo.svg")),
+            dimensions: None,
+        });
+        assert_eq!(estimated_bytes(&content), SMALL_PAYLOAD_EST);
+    }
+
+    /// The budget must actually bind on images, not just the count cap. At a
+    /// 2048-px edge one frame is 16 MiB, so a 96 MiB budget holds six — far
+    /// fewer than `CACHE_CAP`, which is the whole point.
+    #[test]
+    fn the_byte_budget_evicts_images_before_the_count_cap_does() {
+        let mut cache = PreviewCache::default();
+        let edge = 2048;
+        let per_image = (edge as usize) * (edge as usize) * 4;
+        for i in 0..CACHE_CAP {
+            cache.insert(key(&format!("f{i}.png"), 1), decoded_image(edge));
+        }
+        assert!(
+            cache.ready.len() < CACHE_CAP,
+            "the byte budget must evict before the count cap is reached"
+        );
+        assert!(
+            cache.bytes <= BYTE_BUDGET,
+            "resident bytes {} exceed the budget {BYTE_BUDGET}",
+            cache.bytes
+        );
+        assert!(
+            cache.ready.len() <= BYTE_BUDGET / per_image + 1,
+            "resident count {} implies more memory than the budget allows",
+            cache.ready.len()
+        );
     }
 
     #[test]

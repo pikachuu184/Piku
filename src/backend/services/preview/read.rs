@@ -70,6 +70,40 @@ pub fn read_head(path: &Path, cap: usize) -> Result<(Vec<u8>, u64), PreviewError
     Ok((buf, total))
 }
 
+/// The outcome of [`read_all_bounded`]: either the whole file, or a refusal
+/// carrying the size that earned it.
+pub enum BoundedRead {
+    All(Vec<u8>),
+    TooLarge { size: u64 },
+}
+
+/// Read a file **whole**, refusing it before allocating if it is past `max`.
+///
+/// The distinction from [`read_head`] is the order of operations, and it is the
+/// whole point. `read_head` is for parsers that work on a prefix, so it reads
+/// first and lets the caller judge the total afterwards. A parser that needs
+/// the complete file cannot use a prefix, so reading one and then refusing it
+/// allocates the cap for nothing — which for a 256 MiB cap is not nothing.
+///
+/// Blocking. Must run inside `runtime.blocking(..)`.
+pub fn read_all_bounded(path: &Path, max: u64) -> Result<BoundedRead, PreviewError> {
+    let (file, total) = open_read(path)?;
+    if total > max {
+        return Ok(BoundedRead::TooLarge { size: total });
+    }
+    // `total` is already known to be <= max, so this reserves the file's real
+    // size rather than the budget.
+    let mut buf = Vec::with_capacity(total as usize);
+    file.take(max)
+        .read_to_end(&mut buf)
+        .map_err(|source| FileError::Io {
+            op: "reading",
+            path: path.display().to_string().as_str().into(),
+            source,
+        })?;
+    Ok(BoundedRead::All(buf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -126,11 +126,19 @@ pub enum ThumbSource {
 
 /// Identifies one thumbnail. `target` is part of the identity so a future
 /// second size cannot collide with the current one.
+///
+/// `size` is here for the same reason [`PreviewKey`] carries it: `mtime` has
+/// whole-second granularity, so a file rewritten inside the same wall-clock
+/// second keeps its key and would be served the previous thumbnail. A changed
+/// length breaks the tie. It is not a content hash and does not pretend to be —
+/// a same-length rewrite within one second still collides — but it costs a
+/// field already present on the entry and closes the common case.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ThumbKey {
     pub path: PathBuf,
     /// Whole seconds since the epoch, `0` when unknown.
     pub mtime: u64,
+    pub size: u64,
     pub target: u32,
 }
 
@@ -143,6 +151,7 @@ impl ThumbKey {
                 .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            size: entry.size,
             target,
         }
     }
@@ -246,7 +255,29 @@ impl PreviewService {
             let outcome = tokio::select! {
                 biased;
                 () = inner.rt.shutdown_token().cancelled() => Err(PreviewError::Cancelled),
-                joined = joined => joined.unwrap_or(Err(PreviewError::Cancelled)),
+                joined = joined => match joined {
+                    Ok(outcome) => outcome,
+                    // A join failure is still reported as cancelled: the UI
+                    // treats that as "a newer request owns the panel" and
+                    // leaves the previous content alone, which is the right
+                    // behaviour when the worker really was superseded. But a
+                    // *panic* is a provider defect on a file someone is
+                    // looking at, and reporting it as a cancellation makes it
+                    // completely silent — no toast, no log, no spinner change.
+                    // Providers forbid `unwrap`/`expect`/`panic`, so reaching
+                    // this arm means one of them broke that rule, or a
+                    // third-party parser panicked outside its `catch_unwind`.
+                    Err(error) => {
+                        if error.is_panic() {
+                            tracing::error!(
+                                target: "piku::preview",
+                                kind = ?req.kind,
+                                "preview provider panicked; reporting as cancelled",
+                            );
+                        }
+                        Err(PreviewError::Cancelled)
+                    }
+                },
             };
             sink.finish(outcome);
         });
@@ -588,6 +619,7 @@ mod tests {
                 key: ThumbKey {
                     path: p.clone(),
                     mtime: 0,
+                    size: 0,
                     target: THUMB_TARGET,
                 },
                 source: ThumbSource::Image,
@@ -635,6 +667,7 @@ mod tests {
                     key: ThumbKey {
                         path: p,
                         mtime: 0,
+                        size: 0,
                         target: THUMB_TARGET,
                     },
                     source: ThumbSource::Image,

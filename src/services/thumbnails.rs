@@ -203,6 +203,7 @@ mod tests {
         ThumbKey {
             path: PathBuf::from(name),
             mtime: 1,
+            size: 0,
             target: THUMB_TARGET,
         }
     }

@@ -13,7 +13,7 @@
 use crate::backend::error::PreviewError;
 use crate::backend::services::preview::content::{ImagePreview, PreviewPayload, RawImage};
 use crate::backend::services::preview::decode::{self, DecodeError};
-use crate::backend::services::preview::{LoadCtx, PreviewKind, PreviewProvider};
+use crate::backend::services::preview::{LoadCtx, PreviewKind, PreviewProvider, read};
 
 /// File-size gate for a full preview. Larger than the thumbnail gate (32 MiB)
 /// because the inspector is where someone deliberately goes to look at one
@@ -22,11 +22,32 @@ pub const PREVIEW_MAX_BYTES: u64 = 96 * 1024 * 1024;
 
 /// Longest edge of the decoded preview buffer.
 ///
-/// Sized for the viewport, not for the file: the image box is 240 px tall and
-/// zoom tops out at 8×, so 2048 is sharp at maximum magnification. Decoding a
-/// 48 MP photo at full resolution would cost ~192 MB for a 240 px box and would
-/// evict the entire preview cache (budget: 96 MB) on a single selection.
-const PREVIEW_MAX_EDGE: u32 = 2048;
+/// Sized for the cache, not for the file. One buffer at this edge costs
+/// 2048 × 2048 × 4 ≈ 16 MiB of RGBA, and the preview cache's budget is 96 MiB
+/// (`services::preview_cache::BYTE_BUDGET`) — so this size lets several images
+/// stay resident while a 48 MP photo decoded at full resolution (~192 MB) would
+/// evict everything on a single selection.
+///
+/// What this size does **not** promise is pixel-for-pixel sharpness at maximum
+/// zoom. It used to: the inspector's image box was a fixed 240 px tall, and
+/// 240 × 8 (the zoom cap) fits inside 2048 with room to spare. The box is now
+/// the full height of the panel, so that arithmetic no longer holds and the
+/// preview becomes resolution-limited once magnification asks for more source
+/// pixels than were decoded. The UI says so rather than quietly showing a soft
+/// image — see `zoom_is_resolution_limited` in the inspector. Serving real
+/// pixels there needs a second, larger derivative fetched on demand, which
+/// needs `PreviewRequest` to carry a desired size; it does not today.
+pub const PREVIEW_MAX_EDGE: u32 = 2048;
+
+/// File-size gate for an SVG.
+///
+/// SVG is the one preview whose bytes this crate never parses: the renderer
+/// rasterizes it itself (see the module note), so none of [`decode`]'s pixel or
+/// allocation budgets apply to it. That makes the file size the only bound we
+/// can place on the work, and it matters more now that the preview fills the
+/// panel rather than a 240 px box. Generous for hand-authored vector art,
+/// far below anything that would keep the rasterizer busy.
+pub const SVG_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct Image;
 
@@ -39,6 +60,18 @@ impl PreviewProvider for Image {
         ctx.cancel.check()?;
 
         if ctx.ext == "svg" {
+            // The renderer gets a path, so it — not this crate — opens the
+            // file. That would skip `read::open_read`, and with it the two
+            // refusals every other provider gets for free: a symlink is never
+            // followed, and a fifo or device node is never opened. The service
+            // validates paths *lexically* on purpose (canonicalizing would
+            // resolve the link and hand the provider its target), so this is
+            // the layer that has to catch it. Open it here for the refusals and
+            // the size, then drop the handle and hand over the path as before.
+            let (_file, total) = read::open_read(ctx.path)?;
+            if total > SVG_MAX_BYTES {
+                return Ok(PreviewPayload::TooLarge { size: total });
+            }
             return Ok(PreviewPayload::Image(ImagePreview::Path {
                 path: ctx.path.to_path_buf(),
             }));
@@ -70,6 +103,7 @@ impl PreviewProvider for Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::error::FileError;
     use crate::backend::protocol::Cancel;
     use crate::backend::services::preview::{PreviewKind, load};
 
@@ -128,6 +162,47 @@ mod tests {
             payload,
             PreviewPayload::Image(ImagePreview::Path { .. })
         ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The SVG shortcut hands a *path* to the renderer, so this provider is the
+    /// only thing standing between a symlink and the rasterizer opening its
+    /// target. The service validates lexically on purpose, so if this check
+    /// goes away nothing else catches it.
+    #[cfg(unix)]
+    #[test]
+    fn an_svg_symlink_is_refused_rather_than_followed() {
+        let dir = scratch("svg-symlink");
+        let real = dir.join("real.svg");
+        let _ = std::fs::write(&real, b"<svg xmlns='http://www.w3.org/2000/svg'/>");
+        let link = dir.join("link.svg");
+        let _ = std::os::unix::fs::symlink(&real, &link);
+
+        match load(PreviewKind::Image, &link, "svg", &Cancel::never()) {
+            Err(PreviewError::File(FileError::IsSymlink(_))) => {}
+            Err(other) => unreachable!("expected IsSymlink, got {other:?}"),
+            Ok(_) => unreachable!("a symlinked SVG must be refused, not previewed"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An SVG is never decoded here, so its file size is the only bound on the
+    /// rasterization it will cause. Past the gate it is classified, not parsed.
+    #[test]
+    fn an_svg_past_the_size_gate_reports_too_large() {
+        let dir = scratch("svg-too-large");
+        let file = dir.join("huge.svg");
+        let mut bytes = b"<svg xmlns='http://www.w3.org/2000/svg'>".to_vec();
+        bytes.resize(SVG_MAX_BYTES as usize + 1, b' ');
+        let _ = std::fs::write(&file, &bytes);
+
+        let payload = load(PreviewKind::Image, &file, "svg", &Cancel::never()).expect("preview");
+        assert!(
+            matches!(payload, PreviewPayload::TooLarge { size } if size > SVG_MAX_BYTES),
+            "an oversized SVG must be refused before the renderer sees the path"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

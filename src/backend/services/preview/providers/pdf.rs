@@ -49,11 +49,16 @@ impl PreviewProvider for Pdf {
     fn load(&self, ctx: &LoadCtx<'_>) -> Result<PreviewPayload, PreviewError> {
         ctx.cancel.check()?;
 
-        // Cap the size before the C parser ever sees the bytes.
-        let (bytes, total) = read::read_head(ctx.path, PDF_MAX_BYTES as usize)?;
-        if total > PDF_MAX_BYTES {
-            return Ok(PreviewPayload::TooLarge { size: total });
-        }
+        // Cap the size before the C parser ever sees the bytes — and before the
+        // *allocator* does. `read_head` would read up to the cap first and let
+        // the refusal come after, which for a 256 MiB cap means reading and
+        // holding 256 MiB of a document we are about to decline.
+        let bytes = match read::read_all_bounded(ctx.path, PDF_MAX_BYTES)? {
+            read::BoundedRead::All(bytes) => bytes,
+            read::BoundedRead::TooLarge { size } => {
+                return Ok(PreviewPayload::TooLarge { size });
+            }
+        };
 
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             render_pages(&bytes, ctx.cancel)
