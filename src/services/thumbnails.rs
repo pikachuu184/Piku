@@ -99,12 +99,25 @@ impl ThumbnailCache {
     /// For the watcher: a file edited in place keeps its path but should not
     /// keep a stale thumbnail — and, more subtly, should not keep a stale
     /// *failure*.
+    ///
+    /// Returns the discarded images so the caller can free their atlas tiles;
+    /// see [`ThumbnailCache::evict`].
     #[allow(dead_code, reason = "wired to the watch service in Stage 6")]
-    pub fn evict_path(&mut self, path: &std::path::Path) {
-        self.ready.retain(|k, _| k.path != path);
+    #[must_use = "the returned images still own GPU memory; pass them to App::drop_image"]
+    pub fn evict_path(&mut self, path: &std::path::Path) -> Vec<Arc<RenderImage>> {
+        let mut dropped = Vec::new();
+        self.ready.retain(|k, image| {
+            if k.path == path {
+                dropped.push(image.clone());
+                false
+            } else {
+                true
+            }
+        });
         self.failed.retain(|k| k.path != path);
         self.lru.retain(|k| k.path != path);
         self.pending.retain(|(k, _)| k.path != path);
+        dropped
     }
 
     fn touch(&mut self, key: &ThumbKey) {
@@ -154,8 +167,15 @@ impl ThumbnailCache {
                             this.inflight.remove(&thumb.key);
                             match thumb.image {
                                 Some(raw) => {
-                                    this.ready
+                                    let replaced = this
+                                        .ready
                                         .insert(thumb.key.clone(), render_image_from_bgra(raw));
+                                    // Re-decoding a key that was already resident
+                                    // orphans the old image's atlas tile as surely
+                                    // as eviction does.
+                                    if let Some(old) = replaced {
+                                        cx.drop_image(old, None);
+                                    }
                                     this.touch(&thumb.key);
                                 }
                                 None => {
@@ -163,7 +183,13 @@ impl ThumbnailCache {
                                 }
                             }
                         }
-                        this.evict();
+                        // Free the atlas tiles of everything eviction discarded.
+                        // This callback runs from the foreground executor, not
+                        // inside a window update, so every window that painted
+                        // these is reachable through `App` and `None` is right.
+                        for image in this.evict() {
+                            cx.drop_image(image, None);
+                        }
                     }
                     StreamItem::Progress(_) => {}
                     StreamItem::Done(_) => {
@@ -184,13 +210,24 @@ impl ThumbnailCache {
         ));
     }
 
-    fn evict(&mut self) {
+    /// Drop least-recently-used entries until the cache is back under
+    /// [`CACHE_CAP`], returning the images that left.
+    ///
+    /// The return value is load-bearing, not a convenience. A painted
+    /// `RenderImage` owns a sprite-atlas tile that only `App::drop_image` frees,
+    /// so an entry dropped here without that call leaks GPU memory for the life
+    /// of the process. Returning rather than taking a `&mut App` keeps the cache
+    /// testable without a gpui harness.
+    #[must_use = "the returned images still own GPU memory; pass them to App::drop_image"]
+    fn evict(&mut self) -> Vec<Arc<RenderImage>> {
+        let mut dropped = Vec::new();
         while self.ready.len() > CACHE_CAP {
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
-            self.ready.remove(&oldest);
+            dropped.extend(self.ready.remove(&oldest));
         }
+        dropped
     }
 }
 
@@ -217,16 +254,24 @@ mod tests {
     }
 
     /// Eviction is the cache's one real invariant: it must stay bounded.
+    ///
+    /// It must also hand every discarded image back, because that `Arc` owns a
+    /// GPU atlas tile nothing else frees.
     #[test]
     fn the_cache_evicts_the_least_recently_used_past_its_cap() {
         let mut cache = ThumbnailCache::default();
+        let mut released = 0usize;
         for i in 0..CACHE_CAP + 10 {
             let k = key(&format!("f{i}.png"));
             cache.ready.insert(k.clone(), blank());
             cache.touch(&k);
-            cache.evict();
+            released += cache.evict().len();
         }
         assert_eq!(cache.ready.len(), CACHE_CAP);
+        assert_eq!(
+            released, 10,
+            "every evicted image must be returned so its atlas tile can be freed"
+        );
         assert!(
             !cache.ready.contains_key(&key("f0.png")),
             "the oldest entry survived eviction"
@@ -248,7 +293,7 @@ mod tests {
             cache.touch(&k);
             // Keep it warm, the way rendering its row would.
             cache.touch(&hot);
-            cache.evict();
+            drop(cache.evict());
         }
         assert!(cache.ready.contains_key(&hot), "a hot entry was evicted");
     }
@@ -260,7 +305,12 @@ mod tests {
         cache.failed.insert(k.clone());
         cache.ready.insert(k.clone(), blank());
         cache.lru.push_back(k.clone());
-        cache.evict_path(&k.path);
+        let dropped = cache.evict_path(&k.path);
+        assert_eq!(
+            dropped.len(),
+            1,
+            "the discarded image must come back so its atlas tile can be freed"
+        );
         assert!(
             !cache.failed.contains(&k),
             "an edited file must get another chance to decode"

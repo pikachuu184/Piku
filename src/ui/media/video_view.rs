@@ -6,17 +6,34 @@
 //! with tooltips, `cx.theme().radius` corners, tokens only — no new hex, no
 //! shadows. The video surface itself is intentionally dark (`muted`) so frames
 //! read well.
+//!
+//! ## Frames own GPU memory, so this view has to release them
+//!
+//! Every decoded frame is a distinct `RenderImage`, and painting one interns its
+//! pixels into the window's sprite atlas under a globally unique id. `RenderImage`
+//! has no `Drop` impl and `ImageSource::Render` never releases anything, so the
+//! *only* thing that frees that tile is [`Window::drop_image`]. A 960-wide frame
+//! cannot pack twice into gpui's 1024² atlas texture, so without an explicit
+//! release each painted frame permanently owned ~4 MiB of VRAM — roughly
+//! 120 MiB/s at 30 fps, which is why playback degraded the longer it ran.
+//!
+//! So this view keeps the last two painted frames ([`VideoView::shown`] and
+//! [`VideoView::retired`]) and releases a tile only once two further frames have
+//! been painted over it, and an `on_release` hook frees the final two whenever the
+//! view goes away. Releasing is always *safe* rather than merely tolerable:
+//! `paint_image` re-interns on a miss, so an early release costs one re-upload.
 
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, Context, EventEmitter, FocusHandle, Focusable, ImageSource,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit,
-    ParentElement as _, Pixels, Render, Styled as _, StyledImage as _, Window, canvas, div, fill,
-    img, prelude::FluentBuilder as _, px, size,
+    ParentElement as _, Pixels, Render, RenderImage, Styled as _, StyledImage as _, Window, canvas,
+    div, fill, img, prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, Sizable as _, WindowExt as _,
@@ -33,12 +50,25 @@ use crate::ui::media::transport::fmt_clock;
 /// Idle time before the control bar fades while playing.
 const CONTROLS_HIDE_AFTER: Duration = Duration::from_millis(2500);
 
+/// How long to keep saying "Loading…" before a decoder complaint is worth
+/// showing. ffmpeg can gripe about a stream and still recover — and the player
+/// retries in software when hardware decoding produces nothing — so a message
+/// shown instantly would flash on files that go on to play fine.
+const ERROR_GRACE: Duration = Duration::from_millis(1500);
+
 pub struct VideoView {
     focus_handle: FocusHandle,
     player: VideoPlayer,
     fullscreen: bool,
     controls_visible: bool,
     hide_at: Option<Instant>,
+    /// The frame painted by the previous render pass.
+    shown: Option<Arc<RenderImage>>,
+    /// The frame painted the pass before that, still holding its atlas tile.
+    /// Released once a third frame has been painted over it — see the module
+    /// note; dropping a tile the in-flight scene still points at is what the
+    /// delay avoids.
+    retired: Option<Arc<RenderImage>>,
 }
 
 impl VideoView {
@@ -49,8 +79,16 @@ impl VideoView {
             fullscreen: false,
             controls_visible: true,
             hide_at: None,
+            shown: None,
+            retired: None,
         };
         view.start_ticker(cx);
+        // The last two frames still hold atlas tiles when the view goes away
+        // (panel closed, another file opened). `Drop` cannot free them — it has
+        // neither a `Window` nor an `App` — but a release hook does. It runs
+        // during effect flushing, after the window has been handed back, so
+        // `drop_image` reaches every window that painted the frame.
+        cx.on_release(|this, cx| this.release_images(cx)).detach();
         // The player starts silent: opening the file and building the audio
         // decoder is blocking work, and this constructor runs inside `cx.new`
         // on the UI thread. The decoder is `Send`, so it is built on a worker
@@ -67,6 +105,22 @@ impl VideoView {
         })
         .detach();
         view
+    }
+
+    /// Free the atlas tiles of every frame this view still holds.
+    ///
+    /// Called from the release hook registered in [`VideoView::new`]. Without it
+    /// the last two frames of every video ever opened stay resident for the life
+    /// of the process.
+    fn release_images(&mut self, cx: &mut App) {
+        for image in [self.retired.take(), self.shown.take()]
+            .into_iter()
+            .flatten()
+        {
+            // `None`: no window is mid-update here, so every window that could
+            // have painted the frame is reachable through `App`.
+            cx.drop_image(image, None);
+        }
     }
 
     /// Keep the view re-rendering so decoded frames appear and the clock/scrubber
@@ -107,9 +161,38 @@ impl VideoView {
         self.hide_at = Some(Instant::now() + CONTROLS_HIDE_AFTER);
     }
 
-    fn surface(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// Advance the two-deep history of painted frames, freeing the atlas tile of
+    /// whatever falls off the end.
+    ///
+    /// `next` is what this pass is about to paint. Nothing happens while it is
+    /// the same image as last pass (a paused player, or a tick between frames),
+    /// so a still image is never re-uploaded.
+    ///
+    /// Frames the player skipped past without ever handing here were never
+    /// painted and hold no tile, so they need no release — dropping their `Arc`
+    /// is enough.
+    fn rotate_frame(&mut self, next: Option<&Arc<RenderImage>>, window: &mut Window) {
+        let unchanged = match (self.shown.as_ref(), next) {
+            (Some(shown), Some(next)) => Arc::ptr_eq(shown, next),
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
+        if let Some(old) = self.retired.take() {
+            // Two frames have been painted over this one, so no scene still
+            // references its tile.
+            let _ = window.drop_image(old);
+        }
+        self.retired = self.shown.take();
+        self.shown = next.cloned();
+    }
+
+    fn surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let height = if self.fullscreen { 640.0 } else { 380.0 };
         let frame = self.player.current_frame();
+        self.rotate_frame(frame.as_ref(), window);
 
         let body: AnyElement = match frame {
             Some(image) => img(ImageSource::Render(image))
@@ -117,10 +200,18 @@ impl VideoView {
                 .max_h_full()
                 .object_fit(ObjectFit::Contain)
                 .into_any_element(),
+            // Nothing decoded yet. After a grace period an ffmpeg complaint is
+            // worth showing: a failed decode used to be indistinguishable from a
+            // slow one, both sitting behind "Loading…" forever. The message is
+            // sanitized where it is recorded — it is subprocess output shaped by
+            // an untrusted file.
             None => div()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child("Loading…")
+                .child(match self.player.error() {
+                    Some(message) if self.player.startup_elapsed() >= ERROR_GRACE => message,
+                    _ => "Loading…".to_string(),
+                })
                 .into_any_element(),
         };
 
@@ -349,7 +440,11 @@ impl VideoView {
                     return;
                 }
                 let frac = fraction_at(mv.get(), event.position.x);
-                this.player.seek((frac * dur.max(1) as f32) as u64);
+                // `scrub`, not `seek`: a drag fires a move per frame, and each
+                // one used to tear down and respawn both ffmpeg processes. The
+                // clock and the bar still follow the pointer immediately; only
+                // the decoder restart is coalesced.
+                this.player.scrub((frac * dur.max(1) as f32) as u64);
                 cx.notify();
             }))
             .child(
@@ -479,13 +574,13 @@ fn trim_speed(speed: f32) -> String {
 }
 
 impl Render for VideoView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _pass = crate::app::diagnostics::enter_render("VideoView");
         div()
             .id("piku-video-view")
             .track_focus(&self.focus_handle)
             .w_full()
-            .child(self.surface(cx))
+            .child(self.surface(window, cx))
     }
 }
 

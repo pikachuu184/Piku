@@ -6,6 +6,14 @@
 //! on the single UI thread (`Entity` only requires `'static`). While audio is
 //! playing a lightweight ticker re-renders the panel so the transport bar
 //! advances.
+//!
+//! Two decoders, in order. rodio's own is the fast path and handles
+//! MP3/FLAC/WAV/M4A directly from the file. What it cannot do is demux Matroska
+//! or ASF, or decode Opus, AC-3, or HE-AAC at all — the symphonia features rodio
+//! enables simply don't include them — so `.opus`, `.mka`, `.wma`, and `.ac3`
+//! files used to be silent no-ops. Those fall through to
+//! [`FfmpegPcm`](crate::services::ffmpeg_audio::FfmpegPcm), which streams PCM out
+//! of the bundled ffmpeg through a bounded ring.
 
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -13,6 +21,8 @@ use std::time::Duration;
 
 use gpui::{Context, SharedString};
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+
+use crate::services::ffmpeg_audio::FfmpegPcm;
 
 /// Refuse to load an audio file larger than this for in-app playback — a
 /// hostile or accidentally huge file should never be streamed into the
@@ -44,6 +54,13 @@ pub struct AudioPlayer {
     /// Bumped on every `load`; an async sink build from a superseded load is
     /// discarded when it finally arrives.
     load_gen: u64,
+    /// Set when the loaded track is being streamed through ffmpeg rather than
+    /// decoded by rodio. Those sources cannot `try_seek`, so seeking respawns
+    /// them; see [`AudioPlayer::seek`].
+    streamed: bool,
+    /// Media offset the current sink was started at. Non-zero only after an
+    /// ffmpeg-backed seek, whose fresh sink reports `get_pos` from zero.
+    sink_base: Duration,
 }
 
 impl AudioPlayer {
@@ -76,7 +93,7 @@ impl AudioPlayer {
     pub fn position(&self) -> Duration {
         self.sink
             .as_ref()
-            .map(|s| s.get_pos())
+            .map(|s| self.sink_base + s.get_pos())
             .unwrap_or(Duration::ZERO)
     }
 
@@ -163,43 +180,43 @@ impl AudioPlayer {
         if let Some(old) = self.sink.take() {
             old.stop();
         }
+        self.sink_base = Duration::ZERO;
         self.load_gen += 1;
         let generation = self.load_gen;
         let volume = self.effective_volume();
 
         let build = cx.background_executor().spawn(async move {
-            // Reads go through the sanitizing local provider (refuses symlinks/dirs).
+            // Reads go through the sanitizing local provider (refuses symlinks
+            // and directories). It gates *both* decoders: the ffmpeg fallback
+            // below only runs once this has vouched for the path, so handing a
+            // path to a subprocess never skips the check.
             let (file, total) = crate::storage::local().open_read(&path).ok()?;
-            // Untrusted input: never stream an oversized file into the decoder.
-            if total > MAX_PLAY_BYTES {
-                return None;
+            // Untrusted input: never stream an oversized file into rodio, which
+            // reads the file itself and buffers as it sees fit.
+            if total <= MAX_PLAY_BYTES
+                && let Some(sink) = rodio_sink(file, &handle, volume)
+            {
+                return Some((sink, false));
             }
-            // rodio/symphonia can *panic* (not just error) probing a malformed
-            // or unsupported stream — catch it so a bad file is a no-op, not a
-            // crash.
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let decoder = Decoder::new(BufReader::new(file)).ok()?;
-                let sink = Sink::try_new(&handle).ok()?;
-                sink.set_volume(volume);
-                sink.append(decoder);
-                Some(sink)
-            }))
-            .ok()
-            .flatten()
+            // rodio could not read it. ffmpeg streams through a bounded ring, so
+            // the size cap above does not apply here — nothing is ever fully
+            // buffered no matter how long the file is.
+            ffmpeg_sink(&path, 0, &handle, volume).map(|sink| (sink, true))
         });
         cx.spawn(async move |this, cx| {
-            let sink = build.await;
+            let built = build.await;
             let _ = this.update(cx, |this, cx| {
                 // A newer load superseded this one — drop the stale sink.
                 if this.load_gen != generation {
-                    if let Some(sink) = sink {
+                    if let Some((sink, _)) = built {
                         sink.stop();
                     }
                     return;
                 }
-                if let Some(sink) = sink {
+                if let Some((sink, streamed)) = built {
                     sink.play();
                     this.sink = Some(sink);
+                    this.streamed = streamed;
                     this.start_ticker(cx);
                 }
                 cx.notify();
@@ -233,6 +250,8 @@ impl AudioPlayer {
         }
         self.current = None;
         self.meta = None;
+        self.streamed = false;
+        self.sink_base = Duration::ZERO;
         cx.notify();
     }
 
@@ -240,10 +259,51 @@ impl AudioPlayer {
         // Clamp into the known track length so a scrubber drag past the end
         // can't hand the decoder an out-of-range position.
         let target = clamp_seek(pos, self.duration_ms());
-        if let Some(sink) = &self.sink {
+        if self.streamed {
+            // An ffmpeg-backed source has no `try_seek` to offer, so the seek is
+            // a respawn at the new offset — the same trade the video player
+            // makes. Without this the scrubber would silently snap back on
+            // exactly the formats this fallback exists to play.
+            self.restart_stream(target, cx);
+        } else if let Some(sink) = &self.sink {
             let _ = sink.try_seek(target);
         }
         cx.notify();
+    }
+
+    /// Rebuild the ffmpeg-backed sink at `at`, preserving play/pause.
+    ///
+    /// A fresh sink rather than `Sink::clear()`: clear blocks the caller until
+    /// the mixer acknowledges it, and this runs on the UI thread.
+    fn restart_stream(&mut self, at: Duration, cx: &mut Context<Self>) {
+        let Some(path) = self.current.clone() else {
+            return;
+        };
+        let Some(handle) = self.handle() else {
+            return;
+        };
+        let was_playing = self.is_playing();
+        // A fresh sink starts unpaused, so match the old state explicitly.
+        let Some(sink) = ffmpeg_sink(
+            &path,
+            at.as_millis() as u64,
+            &handle,
+            self.effective_volume(),
+        ) else {
+            return;
+        };
+        if !was_playing {
+            sink.pause();
+        }
+        if let Some(old) = self.sink.replace(sink) {
+            old.stop();
+        }
+        // `get_pos` on the new sink counts from zero; the transport reads
+        // absolute media time.
+        self.sink_base = at;
+        if was_playing {
+            self.start_ticker(cx);
+        }
     }
 
     /// Re-render the panel every 250 ms while audio plays, so the transport bar
@@ -277,6 +337,49 @@ impl AudioPlayer {
         })
         .detach();
     }
+}
+
+/// Build a playing sink from rodio's own decoder — the fast path.
+///
+/// rodio/symphonia can *panic* (not just error) probing a malformed or
+/// unsupported stream, so the whole construction is wrapped: a bad file must be
+/// a no-op, not a crash. A panic here is also a legitimate fall-through to
+/// ffmpeg, which is why this returns `Option` rather than reporting.
+fn rodio_sink(file: std::fs::File, handle: &OutputStreamHandle, volume: f32) -> Option<Sink> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let decoder = Decoder::new(BufReader::new(file)).ok()?;
+        let sink = Sink::try_new(handle).ok()?;
+        sink.set_volume(volume);
+        sink.append(decoder);
+        Some(sink)
+    }))
+    .ok()
+    .flatten()
+}
+
+/// Build a playing sink that streams PCM out of ffmpeg from `at_ms`.
+///
+/// `None` when ffmpeg is unavailable or the file has no audio it can decode —
+/// the same graceful silence as before, but now only for files that genuinely
+/// have nothing to play.
+///
+/// **Blocking on the load path** ([`FfmpegPcm::open`] waits for the first chunk,
+/// which is how "no audio" is detected); the seek path uses
+/// [`FfmpegPcm::resume`], which only spawns.
+fn ffmpeg_sink(path: &Path, at_ms: u64, handle: &OutputStreamHandle, volume: f32) -> Option<Sink> {
+    let track = if at_ms == 0 {
+        FfmpegPcm::open(path, 0)?
+    } else {
+        FfmpegPcm::resume(path, at_ms)?
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let sink = Sink::try_new(handle).ok()?;
+        sink.set_volume(volume);
+        sink.append(track);
+        Some(sink)
+    }))
+    .ok()
+    .flatten()
 }
 
 /// Clamp a requested volume into the sink's valid 0..=1 range.
