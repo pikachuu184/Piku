@@ -31,6 +31,7 @@ use crate::app::actions::{self as actions};
 use crate::app::assets::PikuIcon;
 use crate::core::entry::FsEntry;
 use crate::security::file_name::validate_name;
+use crate::security::text::{sanitize_label, sanitize_path};
 use crate::services::watcher::DirWatcher;
 use crate::state::PikuState;
 use crate::state::pane_state::{
@@ -259,15 +260,16 @@ impl ExplorerPanel {
         self.tab_panel.clone()
     }
 
+    /// The tab title. Sanitized: a directory name is filesystem-supplied, and
+    /// the tab strip is one of the few places a name is drawn without any
+    /// surrounding path to give it context.
     pub fn folder_name(&self) -> SharedString {
         self.session
             .cwd
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
+            .map(|n| sanitize_label(&n.to_string_lossy()))
             .unwrap_or_else(|| {
-                self.session
-                    .cwd
-                    .to_string_lossy()
+                sanitize_path(&self.session.cwd)
                     .trim_end_matches('\\')
                     .to_string()
             })
@@ -1586,14 +1588,20 @@ impl Panel for ExplorerPanel {
 /// sanitize the lexical path, resolve junctions/symlinks with
 /// `canonicalize`, then re-authorize the *real* target — a link inside an
 /// allowed root must not open something outside it.
+///
+/// `name` is cleaned here rather than at the call sites. It ends up inside the
+/// two failure toasts below, both of which quote it, and every caller passes a
+/// name that came from the filesystem. Doing it once is the difference between
+/// one correct place and a rule each new caller has to remember.
 pub fn shell_open(name: &str, path: &Path, window: &mut Window, cx: &mut App) {
+    let name = sanitize_label(name);
     let resolved = crate::storage::local()
         .guard()
         .sanitize(path)
         .map_err(|error| error.to_string())
         .and_then(|lexical| {
             std::fs::canonicalize(&lexical)
-                .map_err(|error| format!("resolving {}: {error}", lexical.display()))
+                .map_err(|error| format!("resolving {}: {error}", sanitize_path(&lexical)))
         })
         .and_then(|real| {
             crate::storage::local()

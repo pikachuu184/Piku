@@ -22,9 +22,15 @@ use crate::backend::services::preview::{
     LoadCtx, PDF_MAX_BYTES, PDF_MAX_PAGES, PreviewKind, PreviewProvider, read,
 };
 
-/// Pages rasterized for the (scrollable) preview; large documents show the
-/// first N with a note.
-const PDF_PREVIEW_PAGES: usize = 12;
+/// Pages rasterized by the initial load.
+///
+/// One. The viewer shows a single page at a time and fetches the rest on demand
+/// through [`render_single_page`], so rendering more here is work thrown away:
+/// twelve pages cost eleven rasterizations nothing displayed and ~60 MB of the
+/// preview cache's 96 MB byte budget for one document, which evicted almost
+/// everything else on a single selection. It also capped the document at twelve
+/// pages, because the viewer could only show what the loader had rendered.
+const PDF_PREVIEW_PAGES: usize = 1;
 /// Target raster width per page, in pixels.
 const PDF_PAGE_WIDTH: Pixels = 1000;
 /// Clamp any single page's rasterized height.
@@ -102,9 +108,8 @@ fn render_pages(bytes: &[u8], cancel: &Cancel) -> Result<PreviewPayload, PdfErro
 
     let mut pages = Vec::with_capacity(render_count);
     for index in 0..render_count as u16 {
-        // Each page is a full rasterization at up to 1000x4000; a twelve-page
-        // document is real work, and a superseded selection should not pay for
-        // the remaining pages.
+        // A page is a full rasterization at up to 1000×4000, so a superseded
+        // selection should not pay for one it will never show.
         if cancel.is_cancelled() {
             return Err(PdfError::Cancelled);
         }
@@ -120,16 +125,108 @@ fn render_pages(bytes: &[u8], cancel: &Cancel) -> Result<PreviewPayload, PdfErro
         return Err(PdfError::Failed);
     }
 
-    let note = (total_pages > render_count).then(|| {
-        format!("Showing the first {render_count} of {total_pages} pages.")
-            .as_str()
-            .into()
-    });
+    // No "showing the first N of M" note. The viewer fetches page N on demand
+    // through `render_single_page`, so every page is reachable and a note
+    // saying otherwise would understate what the preview can do. The total
+    // belongs in the toolbar's page counter, which has it.
     Ok(PreviewPayload::Pdf {
         pages,
         total_pages,
-        note,
+        note: None,
     })
+}
+
+/// Rasterize exactly one page, turned `quarter_turns` × 90° clockwise.
+///
+/// This is what makes a document longer than [`PDF_PREVIEW_PAGES`] reachable.
+/// It re-reads and re-parses the document, which is the price of not holding a
+/// pdfium `PdfDocument` across requests: the document borrows its `Pdfium`
+/// binding, pdfium is documented as not thread-safe, and every call in
+/// `pdfium-render` is already serialized behind a mutex — so a cached document
+/// would be a lifetime and threading problem in exchange for parse time on a
+/// file the OS has in page cache.
+///
+/// Every limit the initial load applies applies here too: the size cap before
+/// the allocator, the page cap, `catch_unwind` around the C parser, no V8, and
+/// forms never initialized.
+pub fn render_single_page(
+    path: &std::path::Path,
+    index: usize,
+    quarter_turns: u8,
+    cancel: &Cancel,
+) -> Result<RawImage, PreviewError> {
+    cancel.check()?;
+    let bytes = match read::read_all_bounded(path, PDF_MAX_BYTES)? {
+        read::BoundedRead::All(bytes) => bytes,
+        // The initial load renders the size refusal as its own state; a derived
+        // frame has no such state, and it is only ever asked for after that load
+        // succeeded — so reaching here means the file grew underneath us.
+        read::BoundedRead::TooLarge { .. } => {
+            return Err(PreviewError::Undecodable(
+                "This document is now too large to render.".into(),
+            ));
+        }
+    };
+
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_one(&bytes, index, quarter_turns, cancel)
+    })) {
+        Ok(Ok(raw)) => Ok(raw),
+        Ok(Err(PdfError::Cancelled)) => Err(PreviewError::Cancelled),
+        Ok(Err(PdfError::Unavailable)) => Err(PreviewError::Undecodable(
+            "PDF rendering is unavailable (pdfium library not found).".into(),
+        )),
+        _ => Err(PreviewError::Undecodable(
+            "Could not render that page.".into(),
+        )),
+    }
+}
+
+fn render_one(
+    bytes: &[u8],
+    index: usize,
+    quarter_turns: u8,
+    cancel: &Cancel,
+) -> Result<RawImage, PdfError> {
+    let pdfium = bind_pdfium().ok_or(PdfError::Unavailable)?;
+    let document = pdfium
+        .load_pdf_from_byte_slice(bytes, None)
+        .map_err(|_| PdfError::Failed)?;
+
+    let total_pages = document.pages().len() as usize;
+    if total_pages == 0 || total_pages > PDF_MAX_PAGES || index >= total_pages {
+        return Err(PdfError::Failed);
+    }
+    // `PdfPages::get` indexes with a `u16`. `PDF_MAX_PAGES` is well inside that,
+    // but the conversion is done as a conversion rather than an `as` cast so a
+    // future cap raise fails here instead of wrapping to page 0.
+    let index = u16::try_from(index).map_err(|_| PdfError::Failed)?;
+
+    if cancel.is_cancelled() {
+        return Err(PdfError::Cancelled);
+    }
+    let config = PdfRenderConfig::new()
+        .set_target_width(PDF_PAGE_WIDTH)
+        .set_maximum_height(PDF_PAGE_MAX_HEIGHT)
+        // `true`: the width/height constraints above describe the *result*, so
+        // a quarter-turned page must be measured after turning, not before.
+        .rotate(render_rotation(quarter_turns), true);
+
+    let page = document.pages().get(index).map_err(|_| PdfError::Failed)?;
+    let bitmap = page
+        .render_with_config(&config)
+        .map_err(|_| PdfError::Failed)?;
+    Ok(RawImage::from_rgba(bitmap.as_image().into_rgba8()))
+}
+
+/// Quarter turns as pdfium's clockwise rotation enum.
+fn render_rotation(quarter_turns: u8) -> PdfPageRenderRotation {
+    match quarter_turns % 4 {
+        1 => PdfPageRenderRotation::Degrees90,
+        2 => PdfPageRenderRotation::Degrees180,
+        3 => PdfPageRenderRotation::Degrees270,
+        _ => PdfPageRenderRotation::None,
+    }
 }
 
 /// Bind to a pdfium library shipped next to the executable, else a system one.

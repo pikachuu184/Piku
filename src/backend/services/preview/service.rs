@@ -17,6 +17,7 @@ use crate::backend::protocol::{
 };
 use crate::backend::runtime::BackendRuntime;
 use crate::backend::services::preview::content::{PreviewPayload, RawImage};
+use crate::backend::services::preview::frame::{self, FrameSpec};
 use crate::backend::services::preview::{PreviewKind, decode, kind_for_path, load, probe};
 use crate::core::entry::FsEntry;
 
@@ -287,6 +288,90 @@ impl PreviewService {
             // so the consumer already sees `ShuttingDown` via the dropped
             // channel. Nothing to unwind.
             tracing::debug!(target: "piku::preview", req = %id, "not dispatched: runtime draining");
+        }
+        task
+    }
+
+    /// Decode a frame *derived* from a file whose preview has already loaded —
+    /// page N of a PDF, or a rotated image. See [`frame`] for why both are one
+    /// call.
+    ///
+    /// Takes a concurrency permit like [`Self::preview`] does, because the work
+    /// is the same work: a PDF page is a full rasterization and a rotation is a
+    /// full re-decode, so a held-down page-forward key must not be able to put a
+    /// dozen of them in flight. Cancels when the returned task (or an
+    /// [`Inflight`] taken from it) is dropped, which is what makes holding the
+    /// key down cost one render rather than one per repeat.
+    ///
+    /// [`frame`]: crate::backend::services::preview::frame
+    /// [`Inflight`]: crate::backend::protocol::Inflight
+    pub fn derive_frame(
+        &self,
+        path: PathBuf,
+        spec: FrameSpec,
+    ) -> BackendTask<Result<RawImage, PreviewError>> {
+        let (sink, task) = task_channel();
+        let id = task.id();
+        let inner = self.0.clone();
+
+        let spawned = self.0.rt.spawn(async move {
+            let span = tracing::info_span!(
+                target: "piku::preview",
+                parent: None,
+                "preview.derive_frame",
+                req = %id,
+                spec = ?spec,
+            );
+            let _entered = span.enter();
+
+            let cancel = sink.cancel_handle(inner.rt);
+            let Ok(_permit) = inner.permits.acquire().await else {
+                sink.finish(Err(PreviewError::Cancelled));
+                return;
+            };
+            if cancel.is_cancelled() {
+                sink.finish(Err(PreviewError::Cancelled));
+                return;
+            }
+
+            let for_worker = inner.clone();
+            let worker_cancel = cancel.clone();
+            let joined = inner.rt.blocking(move || {
+                // Same authorization rule as `preview`, for the same reason: the
+                // path arrives untrusted even though it came from a preview that
+                // already succeeded, and `validate` stays lexical so a symlink
+                // is still refused at open time rather than resolved away.
+                let validated = for_worker.policy.validate(&path)?;
+                frame::render(validated.as_path(), spec, &worker_cancel)
+            });
+
+            let outcome = tokio::select! {
+                biased;
+                () = inner.rt.shutdown_token().cancelled() => Err(PreviewError::Cancelled),
+                joined = joined => match joined {
+                    Ok(outcome) => outcome,
+                    // Same reasoning as `preview`: report cancelled so the panel
+                    // keeps what it is showing, but say so in the log, because
+                    // the only way to land here is a defect.
+                    Err(error) => {
+                        if error.is_panic() {
+                            tracing::error!(
+                                target: "piku::preview",
+                                spec = ?spec,
+                                "deriving a frame panicked; reporting as cancelled",
+                            );
+                        }
+                        Err(PreviewError::Cancelled)
+                    }
+                },
+            };
+            sink.finish(outcome);
+        });
+
+        if spawned.is_none() {
+            tracing::debug!(
+                target: "piku::preview", req = %id, "derive_frame not dispatched: runtime draining"
+            );
         }
         task
     }

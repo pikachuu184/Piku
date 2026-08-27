@@ -104,10 +104,37 @@ check_no_interpolated_sql() {
     fi
 }
 
+# --- 5. No raw filesystem paths reach the screen --------------------------
+# A path carries every ancestor directory's name, all of it filesystem-
+# supplied, so one `U+202E` upstream reorders the rendered row for everything
+# beneath it (see src/security/text.rs). `FsEntry::name` is cleaned at
+# construction but the path deliberately is not — it keeps the real bytes,
+# because it is what gets opened. So the ui/ layer has to clean it at the
+# point of display, via sanitize_path/sanitize_label.
+#
+# Element keys and cache keys are a legitimate raw use: nothing draws them.
+# Those lines carry an explicit `raw-path-ok:` marker with the reason, the
+# same escape shape gate 2's comment argues for.
+check_no_raw_paths_in_ui() {
+    local name="ui does not render raw filesystem paths"
+    local hits
+    hits=$(grep -rn '\.display()\|to_string_lossy()' src/ui/ --include='*.rs' \
+        | grep -v 'raw-path-ok:' \
+        | grep -v 'sanitize_path\|sanitize_label\|sanitize_display' || true)
+    if [ -n "$hits" ]; then
+        fail "$name" \
+            "Render paths through security::text::sanitize_path (or sanitize_label for one component). If the value is never drawn, append a 'raw-path-ok: <reason>' comment on that line." \
+            "$hits"
+    else
+        ok "$name"
+    fi
+}
+
 check_no_gpui_in_services
 check_spawn_blocking_confined
 check_no_credentials_in_state
 check_no_interpolated_sql
+check_no_raw_paths_in_ui
 
 if [ "$failed" -ne 0 ]; then
     printf '\n%s\n' "One or more architectural invariants were violated." >&2

@@ -72,6 +72,10 @@ pub enum PikuIcon {
     Scan,
     ZoomIn,
     ZoomOut,
+    FitWidth,
+    RotateCw,
+    ChevronLeft,
+    ChevronRight,
     Eye,
     ListTree,
     Braces,
@@ -83,6 +87,12 @@ pub enum PikuIcon {
     Camera,
     Gauge,
     Minimize,
+    // Shell / inspector chrome. These three used to come from
+    // gpui-component's bundled `IconName` set, which put a second icon
+    // language in the same three-tab row as the Lucide glyphs beside them.
+    Info,
+    FolderOpen,
+    Copy,
     // Git.
     GitBranch,
     GitCommit,
@@ -125,6 +135,10 @@ impl IconNamed for PikuIcon {
             Self::Scan => "icons/piku/scan.svg",
             Self::ZoomIn => "icons/piku/zoom-in.svg",
             Self::ZoomOut => "icons/piku/zoom-out.svg",
+            Self::FitWidth => "icons/piku/fit-width.svg",
+            Self::RotateCw => "icons/piku/rotate-cw.svg",
+            Self::ChevronLeft => "icons/piku/chevron-left.svg",
+            Self::ChevronRight => "icons/piku/chevron-right.svg",
             Self::Eye => "icons/piku/eye.svg",
             Self::ListTree => "icons/piku/list-tree.svg",
             Self::Braces => "icons/piku/braces.svg",
@@ -135,6 +149,9 @@ impl IconNamed for PikuIcon {
             Self::Camera => "icons/piku/camera.svg",
             Self::Gauge => "icons/piku/gauge.svg",
             Self::Minimize => "icons/piku/minimize.svg",
+            Self::Info => "icons/piku/info.svg",
+            Self::FolderOpen => "icons/piku/folder-open.svg",
+            Self::Copy => "icons/piku/copy.svg",
             Self::GitBranch => "icons/piku/git-branch.svg",
             Self::GitCommit => "icons/piku/git-commit.svg",
         }

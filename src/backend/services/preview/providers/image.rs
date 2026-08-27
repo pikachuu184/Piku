@@ -11,6 +11,7 @@
 //! `image` crate cannot rasterize it, so it keeps the path route.
 
 use crate::backend::error::PreviewError;
+use crate::backend::protocol::Cancel;
 use crate::backend::services::preview::content::{ImagePreview, PreviewPayload, RawImage};
 use crate::backend::services::preview::decode::{self, DecodeError};
 use crate::backend::services::preview::{LoadCtx, PreviewKind, PreviewProvider, read};
@@ -100,11 +101,67 @@ impl PreviewProvider for Image {
     }
 }
 
+/// Decode `path` and turn it `quarter_turns` × 90° clockwise.
+///
+/// Rotation is new pixels rather than a transform because gpui's
+/// `with_transformation` exists on `svg` only, not on `img` — so there is no way
+/// to turn a raster image in the renderer. Doing it here means it happens on a
+/// worker, under the same decode budget as the first load, and reuses the same
+/// `apply_orientation` path `decode.rs` already uses for EXIF.
+///
+/// The result is downscaled to [`PREVIEW_MAX_EDGE`] exactly as [`Image::load`]
+/// does, so a rotated frame costs the cache no more than the unrotated one.
+pub fn render_rotated(
+    path: &std::path::Path,
+    quarter_turns: u8,
+    cancel: &Cancel,
+) -> Result<RawImage, PreviewError> {
+    let decoded = match decode::decode_bounded(path, PREVIEW_MAX_BYTES, cancel) {
+        Ok(decoded) => decoded,
+        // [`Image::load`] renders the size refusal as its own state; a derived
+        // frame has no such state, and it is only ever asked for after that load
+        // succeeded — so reaching here means the file grew underneath us.
+        Err(DecodeError::TooLarge { .. }) => {
+            return Err(PreviewError::Undecodable(
+                "This image is now too large to render.".into(),
+            ));
+        }
+        Err(DecodeError::Failed(error)) => return Err(error),
+    };
+    cancel.check()?;
+
+    let mut image = decoded.image;
+    if let Some(orientation) = quarter_turn_orientation(quarter_turns) {
+        image.apply_orientation(orientation);
+    }
+    cancel.check()?;
+    Ok(RawImage::from_rgba(
+        image
+            .thumbnail(PREVIEW_MAX_EDGE, PREVIEW_MAX_EDGE)
+            .into_rgba8(),
+    ))
+}
+
+/// Quarter turns as an `image` orientation, or `None` for no turn.
+///
+/// `Orientation` is the crate's own rotate/flip vocabulary and
+/// `apply_orientation` is its in-place application — the same pair `decode.rs`
+/// uses to honour an EXIF tag, so a user rotation and a camera rotation go
+/// through one code path.
+fn quarter_turn_orientation(quarter_turns: u8) -> Option<image::metadata::Orientation> {
+    use image::metadata::Orientation;
+    match quarter_turns % 4 {
+        1 => Some(Orientation::Rotate90),
+        2 => Some(Orientation::Rotate180),
+        3 => Some(Orientation::Rotate270),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::error::FileError;
-    use crate::backend::protocol::Cancel;
     use crate::backend::services::preview::{PreviewKind, load};
 
     fn scratch(name: &str) -> std::path::PathBuf {
