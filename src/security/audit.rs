@@ -38,6 +38,11 @@ use chrono::Local;
 /// Rotate the log once it grows past this; one previous generation is kept.
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
+/// Upper bound on the `op` name, in characters. Every call site passes a
+/// literal, so this bounds nothing untrusted — it is here so no field reaches
+/// the log without a cap.
+const MAX_OP_CHARS: usize = 64;
+
 /// Upper bound on the free-text `detail` field, in characters. It carries OS
 /// error strings, which embed attacker-chosen filenames.
 const MAX_DETAIL_CHARS: usize = 512;
@@ -60,6 +65,46 @@ struct Record {
     detail: String,
 }
 
+impl Record {
+    /// Build a record with every attacker-influenced field already sanitized.
+    ///
+    /// Split out of [`record`] so the sanitizing — the part that carries a
+    /// security claim — can be exercised without the process-wide sink.
+    fn sanitized(
+        seq: u64,
+        op: &str,
+        src: &Path,
+        dst: Option<&Path>,
+        ok: bool,
+        detail: &str,
+    ) -> Self {
+        use crate::security::text::sanitize_display;
+        Self {
+            seq,
+            time: Local::now().to_rfc3339(),
+            op: sanitize_display(op, MAX_OP_CHARS, false),
+            src: clean_path(src),
+            dst: dst.map(clean_path),
+            ok,
+            detail: sanitize_display(detail, MAX_DETAIL_CHARS, false),
+        }
+    }
+
+    /// The record as the single JSON line that goes in the log.
+    fn to_line(&self) -> String {
+        serde_json::json!({
+            "seq": self.seq,
+            "time": self.time,
+            "op": self.op,
+            "src": self.src,
+            "dst": self.dst,
+            "ok": self.ok,
+            "detail": self.detail,
+        })
+        .to_string()
+    }
+}
+
 enum Message {
     Write(Box<Record>),
     /// Flush marker used by tests to wait for the queue to drain. Production
@@ -75,14 +120,39 @@ struct Sink {
 static SINK: OnceLock<Option<Sink>> = OnceLock::new();
 static SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Where the log lives, or `None` if there is no per-user data directory.
+/// Allocate the next sequence number.
+///
+/// Taken when the record is *created*, not when it is written, so a record the
+/// queue drops still leaves a visible gap.
+fn next_seq() -> u64 {
+    SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The directory the log lives in, or `None` if there is no per-user data
+/// directory.
+///
+/// Computes a path and creates nothing, which is what lets a test assert where
+/// the log may land without writing anywhere.
+fn log_dir() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join("piku"))
+}
+
+/// Where the log lives, or `None` if there is nowhere it may go.
 ///
 /// `persistence::data_dir()` falls back to the process working directory when
 /// the platform cannot supply one. That fallback is fine for state files but
 /// not for an audit log: it would scatter records containing absolute paths
 /// into whatever directory the app was launched from.
+///
+/// `None` is a normal outcome, not a malfunction. On Linux `dirs::data_dir()`
+/// is `$XDG_DATA_HOME` when that is absolute and `$HOME/.local/share`
+/// otherwise, so a process started with no `HOME` has no data directory at all,
+/// and one confined by a sandbox may have one it cannot create or write. Either
+/// way auditing turns itself off. That is why the tests below never come
+/// through here: asserting on the real log made them fail wherever this
+/// correctly returned `None`.
 fn log_path() -> Option<PathBuf> {
-    let dir = dirs::data_dir()?.join("piku");
+    let dir = log_dir()?;
     if let Err(error) = std::fs::create_dir_all(&dir) {
         tracing::error!(%error, "cannot create the app data directory; auditing is disabled");
         return None;
@@ -114,16 +184,7 @@ fn writer_loop(path: &Path, rx: &std::sync::mpsc::Receiver<Message>) {
             Message::Write(record) => {
                 rotate_if_needed(path);
                 if let Some(mut file) = open_append(path) {
-                    let line = serde_json::json!({
-                        "seq": record.seq,
-                        "time": record.time,
-                        "op": record.op,
-                        "src": record.src,
-                        "dst": record.dst,
-                        "ok": record.ok,
-                        "detail": record.detail,
-                    });
-                    let _ = writeln!(file, "{line}");
+                    let _ = writeln!(file, "{}", record.to_line());
                 }
             }
             #[cfg(test)]
@@ -196,33 +257,21 @@ fn clean_path(path: &Path) -> String {
 /// newline inject a fake line into a console or journal reading the tracing
 /// side.
 pub fn record(op: &str, src: &Path, dst: Option<&Path>, ok: bool, detail: &str) {
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let op = crate::security::text::sanitize_display(op, 64, false);
-    let src = clean_path(src);
-    let dst = dst.map(clean_path);
-    let detail = crate::security::text::sanitize_display(detail, MAX_DETAIL_CHARS, false);
+    let record = Record::sanitized(next_seq(), op, src, dst, ok, detail);
+    let seq = record.seq;
 
     tracing::info!(
         target: "piku::audit",
         seq,
-        op = %op,
-        src = %src,
-        dst = %dst.as_deref().unwrap_or_default(),
-        ok,
-        detail = %detail,
+        op = %record.op,
+        src = %record.src,
+        dst = %record.dst.as_deref().unwrap_or_default(),
+        ok = record.ok,
+        detail = %record.detail,
     );
 
     let Some(sink) = sink() else {
         return;
-    };
-    let record = Record {
-        seq,
-        time: Local::now().to_rfc3339(),
-        op,
-        src,
-        dst,
-        ok,
-        detail,
     };
     // `try_send`: if the writer is wedged on a stuck disk, drop the record
     // rather than stall the filesystem operation that produced it. The gap is
@@ -232,68 +281,127 @@ pub fn record(op: &str, src: &Path, dst: Option<&Path>, ok: bool, detail: &str) 
     }
 }
 
-/// Block until every record queued so far has been written.
-///
-/// Test-only: production code never waits on the audit trail.
-#[cfg(test)]
-fn flush() {
-    if let Some(sink) = sink() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        if sink.tx.send(Message::Sync(tx)).is_ok() {
-            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Reads the live log. These tests share one process-wide sink (it is a
-    /// `OnceLock` plus a thread), so they assert on records they can identify
-    /// by a unique `op` rather than on the file's whole contents.
-    fn lines_for(op: &str) -> Vec<serde_json::Value> {
-        flush();
-        let Some(path) = log_path() else {
-            return Vec::new();
-        };
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Vec::new();
-        };
-        text.lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|v| v.get("op").and_then(|o| o.as_str()) == Some(op))
-            .collect()
+    /// A log of this suite's own: its own file in the temp directory, with its
+    /// own writer thread.
+    ///
+    /// These tests deliberately do **not** go through [`sink`] or [`record`].
+    /// That sink is a process-wide `OnceLock` over the user's real data
+    /// directory, which made the suite both destructive and
+    /// environment-dependent. Destructive because `cargo test` appended its
+    /// records to the machine's actual audit trail — a security artifact — where
+    /// they outnumbered the real ones. Environment-dependent because a run whose
+    /// [`log_path`] is `None` gets no sink at all, so [`record`] correctly drops
+    /// every record and each assertion here collapsed to `0 == n`, reporting an
+    /// unwritable data directory as six code failures.
+    ///
+    /// The code under test is unchanged: [`writer_loop`], [`open_append`],
+    /// [`Record::sanitized`] and [`Record::to_line`] are the production
+    /// functions, driven over a file this suite owns. Only the location differs.
+    /// What that leaves uncovered is the three lines of [`record`] that hand a
+    /// built record to the global sink; exercising those means writing to the
+    /// machine's real trail, which is the thing being fixed.
+    struct TestLog {
+        dir: PathBuf,
+        path: PathBuf,
+        /// `Option` only so [`Drop`] can close the channel before joining:
+        /// dropping the last sender is what ends [`writer_loop`].
+        tx: Option<std::sync::mpsc::SyncSender<Message>>,
+        writer: Option<std::thread::JoinHandle<()>>,
     }
 
-    /// A marker no other run can collide with.
-    ///
-    /// The log is append-only and persists between `cargo test` invocations,
-    /// so an op string derived from anything reused across runs (a counter, a
-    /// fixed name) matches records left by an *earlier* run and makes exact
-    /// count assertions flaky.
-    fn unique_op(tag: &str) -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("test.{tag}.{}.{nanos}", std::process::id())
+    impl TestLog {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join("piku-audit-tests").join(tag);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            let path = dir.join("audit.log");
+
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Message>(QUEUE_DEPTH);
+            let for_writer = path.clone();
+            let writer = std::thread::Builder::new()
+                .name(format!("piku-audit-test-{tag}"))
+                .spawn(move || writer_loop(&for_writer, &rx))
+                .expect("writer thread");
+
+            Self {
+                dir,
+                path,
+                tx: Some(tx),
+                writer: Some(writer),
+            }
+        }
+
+        fn tx(&self) -> &std::sync::mpsc::SyncSender<Message> {
+            self.tx
+                .as_ref()
+                .expect("the channel is closed only by Drop")
+        }
+
+        /// Sanitize and queue one record the way [`record`] does.
+        ///
+        /// `send`, not `try_send`: a test that silently dropped a record would
+        /// assert against a short log and blame the writer.
+        fn record(&self, op: &str, src: &Path, dst: Option<&Path>, ok: bool, detail: &str) {
+            let record = Record::sanitized(next_seq(), op, src, dst, ok, detail);
+            self.tx()
+                .send(Message::Write(Box::new(record)))
+                .expect("queue a record");
+        }
+
+        /// Every line in the log, parsed, once the writer has drained.
+        ///
+        /// A line that is not valid JSON fails here rather than being filtered
+        /// out, so a forged or half-written line cannot hide from the counts
+        /// below — which is what makes `len()` a claim about the file and not
+        /// merely about the records that happened to parse.
+        fn lines(&self) -> Vec<serde_json::Value> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.tx().send(Message::Sync(tx)).expect("queue a sync");
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("writer drained the queue");
+
+            let text = std::fs::read_to_string(&self.path).unwrap_or_default();
+            text.lines()
+                .map(|line| {
+                    serde_json::from_str(line)
+                        .unwrap_or_else(|error| panic!("log line is not JSON ({error}): {line:?}"))
+                })
+                .collect()
+        }
+    }
+
+    impl Drop for TestLog {
+        fn drop(&mut self) {
+            // Close the channel first: that is what ends the writer's `recv`
+            // loop. Joining before the directory goes away keeps a record in
+            // flight from recreating the file after it is removed.
+            drop(self.tx.take());
+            if let Some(writer) = self.writer.take() {
+                let _ = writer.join();
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     #[test]
     fn a_record_round_trips_with_its_fields() {
-        let op = unique_op("roundtrip");
-        record(
-            &op,
+        let log = TestLog::new("roundtrip");
+        log.record(
+            "move_file",
             Path::new("/tmp/a.txt"),
             Some(Path::new("/tmp/b.txt")),
             true,
             "",
         );
-        let found = lines_for(&op);
+
+        let found = log.lines();
         assert_eq!(found.len(), 1, "expected exactly one record");
         let r = &found[0];
+        assert_eq!(r["op"], "move_file");
         assert_eq!(r["src"], "/tmp/a.txt");
         assert_eq!(r["dst"], "/tmp/b.txt");
         assert_eq!(r["ok"], true);
@@ -302,29 +410,38 @@ mod tests {
     }
 
     /// A filename is attacker-controlled. Without sanitizing, a newline in one
-    /// would let it forge an extra record.
+    /// would forge an extra record — so this asserts on the number of lines in
+    /// the file, not just on what the field ended up holding.
     #[test]
     fn path_text_cannot_forge_a_record() {
-        let op = unique_op("forge");
+        let log = TestLog::new("forge");
         let hostile = "/tmp/a\n{\"op\":\"forged\"}\n\u{202E}evil\u{1B}[31m";
-        record(&op, Path::new(hostile), None, false, "");
-        let found = lines_for(&op);
-        assert_eq!(found.len(), 1);
+        log.record("delete_file", Path::new(hostile), None, false, "");
+
+        let found = log.lines();
+        assert_eq!(found.len(), 1, "a hostile path added a line: {found:#?}");
+        assert_eq!(found[0]["op"], "delete_file", "the forged op won");
         let src = found[0]["src"].as_str().unwrap();
         assert!(!src.contains('\n'), "newline survived: {src:?}");
         assert!(!src.contains('\u{202E}'), "bidi override survived");
         assert!(!src.contains('\u{1B}'), "escape survived");
-        // And no forged record appeared.
-        assert!(lines_for("forged").is_empty());
     }
 
     #[test]
     fn detail_is_capped() {
-        let op = unique_op("cap");
-        record(&op, Path::new("/tmp/a"), None, false, &"x".repeat(5_000));
-        let found = lines_for(&op);
+        let log = TestLog::new("cap");
+        log.record(
+            "delete_file",
+            Path::new("/tmp/a"),
+            None,
+            false,
+            &"x".repeat(5_000),
+        );
+
+        let found = log.lines();
         assert_eq!(found.len(), 1);
         let detail = found[0]["detail"].as_str().unwrap();
+        // The cap plus the one ellipsis `sanitize_display` appends when it cuts.
         assert!(
             detail.chars().count() <= MAX_DETAIL_CHARS + 1,
             "detail not capped: {} chars",
@@ -332,13 +449,18 @@ mod tests {
         );
     }
 
+    /// Increasing, not consecutive: [`SEQ`] is process-wide and the other tests
+    /// draw from it in parallel. That is the property the log actually promises
+    /// — a gap is visible — and asserting consecutiveness would make the test
+    /// depend on which tests ran alongside it.
     #[test]
     fn sequence_numbers_are_monotonic_so_gaps_are_visible() {
-        let op = unique_op("seq");
+        let log = TestLog::new("seq");
         for _ in 0..5 {
-            record(&op, Path::new("/tmp/a"), None, true, "");
+            log.record("copy_file", Path::new("/tmp/a"), None, true, "");
         }
-        let found = lines_for(&op);
+
+        let found = log.lines();
         assert_eq!(found.len(), 5);
         let seqs: Vec<u64> = found
             .iter()
@@ -351,13 +473,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_log_is_owner_only() {
+    fn a_new_log_is_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
-        let op = unique_op("perms");
-        record(&op, Path::new("/tmp/a"), None, true, "");
-        flush();
-        let path = log_path().expect("data dir");
-        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        let log = TestLog::new("perms-new");
+        log.record("delete_file", Path::new("/tmp/a"), None, true, "");
+        assert_eq!(log.lines().len(), 1, "nothing was written to stat");
+
+        let mode = std::fs::metadata(&log.path)
+            .expect("stat")
+            .permissions()
+            .mode();
         assert_eq!(
             mode & 0o077,
             0,
@@ -366,23 +491,77 @@ mod tests {
         );
     }
 
+    /// `OpenOptions::mode` applies at creation only, so a log left at 0644 by an
+    /// earlier version would stay readable by every local account forever.
+    /// [`open_append`] tightens it on the way in — a claim its comment makes and
+    /// nothing checked.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_lax_log_is_tightened_on_open() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let log = TestLog::new("perms-tighten");
+        std::fs::write(&log.path, b"{\"seq\":0}\n").expect("seed a log");
+        std::fs::set_permissions(&log.path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen it");
+
+        drop(open_append(&log.path).expect("open"));
+
+        let mode = std::fs::metadata(&log.path)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "a 0644 log was left readable: {:o}",
+            mode & 0o777
+        );
+    }
+
     #[test]
     fn concurrent_writers_do_not_interleave_or_lose_lines() {
-        let op = unique_op("concurrent");
-        let threads: Vec<_> = (0..8)
-            .map(|t| {
-                let op = op.clone();
-                std::thread::spawn(move || {
+        let log = TestLog::new("concurrent");
+        std::thread::scope(|scope| {
+            for t in 0..8 {
+                let log = &log;
+                scope.spawn(move || {
                     for i in 0..10 {
-                        record(&op, Path::new(&format!("/tmp/t{t}-{i}")), None, true, "");
+                        log.record(
+                            "copy_file",
+                            Path::new(&format!("/tmp/t{t}-{i}")),
+                            None,
+                            true,
+                            "",
+                        );
                     }
-                })
-            })
-            .collect();
-        for t in threads {
-            t.join().expect("join");
-        }
-        let found = lines_for(&op);
+                });
+            }
+        });
+
+        let found = log.lines();
         assert_eq!(found.len(), 80, "records lost or corrupted by interleaving");
+        let mut seqs: Vec<u64> = found
+            .iter()
+            .map(|r| r["seq"].as_u64().expect("seq"))
+            .collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), 80, "two records shared a sequence number");
+    }
+
+    /// The one claim about the real location that holds without writing there:
+    /// the log lives under the per-user data directory or nowhere at all. The
+    /// `None` case is the documented refusal — no data directory means auditing
+    /// is off, not a log dropped wherever the process started.
+    #[test]
+    fn the_log_never_lands_outside_the_data_directory() {
+        match (log_dir(), dirs::data_dir()) {
+            (Some(dir), Some(data)) => {
+                assert!(dir.starts_with(&data), "{dir:?} is outside {data:?}");
+                assert_eq!(dir.file_name().and_then(|n| n.to_str()), Some("piku"));
+            }
+            (None, None) => {}
+            (dir, data) => panic!("log_dir() {dir:?} disagrees with data_dir() {data:?}"),
+        }
     }
 }
