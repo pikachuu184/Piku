@@ -1,5 +1,6 @@
 pub mod audio_player;
 pub mod drive_scan;
+pub mod ffmpeg_audio;
 pub mod fs_service;
 pub mod git;
 pub mod jobs;

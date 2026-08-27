@@ -20,7 +20,10 @@ use super::content::{MetaRow, RawImage};
 /// Whether a runnable ffmpeg binary is resolvable (bundled next to the exe, in
 /// the sidecar cache, or on PATH). Probed once — the check itself spawns a
 /// process, so it must not run per-thumbnail.
-fn ffmpeg_available() -> bool {
+///
+/// Public so the playback side shares this one cached probe rather than paying
+/// for its own process spawn.
+pub fn ffmpeg_available() -> bool {
     static AVAIL: OnceLock<bool> = OnceLock::new();
     *AVAIL.get_or_init(ffmpeg_sidecar::command::ffmpeg_is_installed)
 }

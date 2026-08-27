@@ -17,6 +17,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use gpui::{App, Entity, RenderImage};
+
 use crate::preview::content::{PreviewContent, PreviewImage};
 
 /// The key is defined by the service, not here, and the service echoes back the
@@ -56,20 +58,39 @@ impl PreviewCache {
 
     /// Store a decoded preview. No-op for payloads we deliberately don't cache
     /// (see [`cacheable`]); otherwise inserts and evicts back under budget.
-    pub fn insert(&mut self, key: PreviewKey, content: Arc<PreviewContent>) {
+    ///
+    /// Returns every `RenderImage` that left the cache — replaced or evicted —
+    /// because each one owns a sprite-atlas tile that nothing but
+    /// `App::drop_image` frees. Dropping the `Arc` alone leaks GPU memory for
+    /// the life of the process. Returning them rather than taking a `&mut App`
+    /// keeps this type testable without a gpui harness.
+    #[must_use = "the returned images still own GPU memory; pass them to App::drop_image"]
+    pub fn insert(
+        &mut self,
+        key: PreviewKey,
+        content: Arc<PreviewContent>,
+    ) -> Vec<Arc<RenderImage>> {
         if !cacheable(&content) {
-            return;
+            return Vec::new();
         }
+        let mut dropped = Vec::new();
         if let Some(old) = self.ready.insert(key.clone(), content.clone()) {
             // Replacing an existing entry: drop its byte estimate first.
             self.bytes = self.bytes.saturating_sub(estimated_bytes(&old));
             if let Some(pos) = self.lru.iter().position(|k| k == &key) {
                 self.lru.remove(pos);
             }
+            // Re-inserting the *same* payload (both panels cache one decode) is
+            // not a discard — releasing those tiles would only force a re-upload
+            // of images still on screen.
+            if !Arc::ptr_eq(&old, &content) {
+                content_images(&old, &mut dropped);
+            }
         }
         self.bytes = self.bytes.saturating_add(estimated_bytes(&content));
         self.lru.push_back(key);
-        self.evict();
+        self.evict(&mut dropped);
+        dropped
     }
 
     fn touch(&mut self, key: &PreviewKey) {
@@ -79,15 +100,60 @@ impl PreviewCache {
         self.lru.push_back(key.clone());
     }
 
-    fn evict(&mut self) {
+    fn evict(&mut self, dropped: &mut Vec<Arc<RenderImage>>) {
         while self.ready.len() > CACHE_CAP || self.bytes > BYTE_BUDGET {
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
             if let Some(content) = self.ready.remove(&oldest) {
                 self.bytes = self.bytes.saturating_sub(estimated_bytes(&content));
+                content_images(&content, dropped);
             }
         }
+    }
+}
+
+/// Every decoded frame inside `content`, appended to `out`.
+///
+/// Deliberately shaped like [`estimated_bytes`] and kept next to it: a variant
+/// that holds an image and is billed by one but missed by the other is exactly
+/// how a leak comes back. An image still referenced elsewhere is safe to list —
+/// `paint_image` re-interns on a miss, so the worst case is one re-upload.
+fn content_images(content: &PreviewContent, out: &mut Vec<Arc<RenderImage>>) {
+    match content {
+        PreviewContent::Image {
+            source: PreviewImage::Decoded(frame),
+            ..
+        } => out.push(frame.clone()),
+        PreviewContent::Video {
+            poster: Some(poster),
+            ..
+        } => out.push(poster.clone()),
+        PreviewContent::Pdf { pages, .. } => out.extend(pages.iter().cloned()),
+        // SVG rasterizes inside the renderer and everything else is text or
+        // metadata: no buffer of ours, so no tile of ours.
+        _ => {}
+    }
+}
+
+/// Cache `content` under `key`, freeing the atlas tiles of whatever that
+/// displaced.
+///
+/// The inspector and the media panel both decode-then-cache on the same shape of
+/// callback, and both have to release what [`PreviewCache::insert`] hands back.
+/// That release lives here, once, rather than being copied to each call site and
+/// eventually forgotten at one of them.
+pub fn cache_preview(
+    cache: &Entity<PreviewCache>,
+    key: PreviewKey,
+    content: Arc<PreviewContent>,
+    cx: &mut App,
+) {
+    for image in cache.update(cx, |c, _| c.insert(key, content)) {
+        // `None`: these callbacks run from the foreground executor rather than
+        // inside a window update, so every window that could have painted the
+        // image is reachable through `App`.
+        cx.drop_image(image, None);
     }
 }
 
@@ -140,7 +206,7 @@ fn image_bytes(source: &PreviewImage) -> usize {
 ///
 /// `size()` is public API, so this does not depend on `RenderImage` internals —
 /// which is what the flat constant was avoiding, at the cost of being wrong.
-fn render_image_bytes(frame: &Arc<gpui::RenderImage>) -> usize {
+fn render_image_bytes(frame: &Arc<RenderImage>) -> usize {
     let size = frame.size(0);
     let width = u32::from(size.width) as usize;
     let height = u32::from(size.height) as usize;
@@ -215,8 +281,11 @@ mod tests {
         let mut cache = PreviewCache::default();
         let edge = 2048;
         let per_image = (edge as usize) * (edge as usize) * 4;
+        let mut released = 0usize;
         for i in 0..CACHE_CAP {
-            cache.insert(key(&format!("f{i}.png"), 1), decoded_image(edge));
+            released += cache
+                .insert(key(&format!("f{i}.png"), 1), decoded_image(edge))
+                .len();
         }
         assert!(
             cache.ready.len() < CACHE_CAP,
@@ -232,20 +301,128 @@ mod tests {
             "resident count {} implies more memory than the budget allows",
             cache.ready.len()
         );
+        // The leak this closed: every evicted frame must come back so its atlas
+        // tile can be freed, or 16 MiB of VRAM goes with each one.
+        assert_eq!(
+            released,
+            CACHE_CAP - cache.ready.len(),
+            "every evicted image must be handed back for release"
+        );
+    }
+
+    /// Overwriting a key is a discard too — distinct from eviction, and the
+    /// easier of the two to miss.
+    #[test]
+    fn replacing_an_entry_hands_back_the_old_image() {
+        let mut cache = PreviewCache::default();
+        let k = key("frame.png", 1);
+        assert!(cache.insert(k.clone(), decoded_image(16)).is_empty());
+        let released = cache.insert(k.clone(), decoded_image(16));
+        assert_eq!(
+            released.len(),
+            1,
+            "the replaced image must be handed back for release"
+        );
+    }
+
+    /// Both panels cache the same decode under the same key. Treating that as a
+    /// discard would release a tile for an image still on screen.
+    #[test]
+    fn reinserting_the_same_payload_releases_nothing() {
+        let mut cache = PreviewCache::default();
+        let k = key("frame.png", 1);
+        let content = decoded_image(16);
+        assert!(cache.insert(k.clone(), content.clone()).is_empty());
+        assert!(
+            cache.insert(k, content).is_empty(),
+            "re-caching one payload must not release its own tiles"
+        );
+    }
+
+    /// The walker must stay in step with [`estimated_bytes`]: a variant billed
+    /// for a frame but not searched for one leaks it.
+    #[test]
+    fn the_image_walker_finds_every_billed_frame() {
+        let frame = |edge: u32| {
+            crate::preview::image_util::render_image_from_bgra(
+                crate::backend::services::preview::content::RawImage {
+                    width: edge,
+                    height: edge,
+                    bgra: vec![0u8; (edge as usize) * (edge as usize) * 4],
+                },
+            )
+        };
+        let cases: Vec<(&str, PreviewContent, usize)> = vec![
+            (
+                "video poster",
+                PreviewContent::Video {
+                    rows: Vec::new(),
+                    poster: Some(frame(64)),
+                },
+                1,
+            ),
+            (
+                "pdf pages",
+                PreviewContent::Pdf {
+                    pages: vec![frame(64), frame(64), frame(64)],
+                    total_pages: 3,
+                    note: None,
+                },
+                3,
+            ),
+            (
+                "decoded image",
+                PreviewContent::Image {
+                    source: PreviewImage::Decoded(frame(64)),
+                    dimensions: Some((64, 64)),
+                },
+                1,
+            ),
+            (
+                "video without a poster",
+                PreviewContent::Video {
+                    rows: Vec::new(),
+                    poster: None,
+                },
+                0,
+            ),
+            (
+                "svg",
+                PreviewContent::Image {
+                    source: PreviewImage::Path(std::path::PathBuf::from("logo.svg")),
+                    dimensions: None,
+                },
+                0,
+            ),
+        ];
+        for (name, content, expected) in cases {
+            let mut found = Vec::new();
+            content_images(&content, &mut found);
+            assert_eq!(found.len(), expected, "wrong frame count for {name}");
+            // The two must agree: anything billed for a buffer holds a tile.
+            let billed = estimated_bytes(&content) > SMALL_PAYLOAD_EST;
+            assert_eq!(
+                billed,
+                expected > 0,
+                "{name} is billed as {} but walked as {}",
+                if billed { "a buffer" } else { "metadata" },
+                if expected > 0 { "a buffer" } else { "metadata" }
+            );
+        }
     }
 
     #[test]
     fn get_returns_inserted() {
         let mut cache = PreviewCache::default();
         let k = key("a.mp3", 1);
-        cache.insert(k.clone(), audio(10));
+        drop(cache.insert(k.clone(), audio(10)));
         assert!(cache.get(&k).is_some());
     }
 
     #[test]
     fn changed_mtime_is_a_miss() {
         let mut cache = PreviewCache::default();
-        cache.insert(key("a.mp3", 1), audio(10));
+        drop(cache.insert(key("a.mp3", 1), audio(10)));
         // Same path, newer mtime → different key → not found (forces re-decode).
         assert!(cache.get(&key("a.mp3", 2)).is_none());
     }
@@ -254,7 +431,7 @@ mod tests {
     fn count_eviction_drops_oldest() {
         let mut cache = PreviewCache::default();
         for i in 0..(CACHE_CAP + 5) {
-            cache.insert(key(&format!("f{i}.mp3"), 1), audio(1));
+            drop(cache.insert(key(&format!("f{i}.mp3"), 1), audio(1)));
         }
         assert!(cache.ready.len() <= CACHE_CAP);
         // The very first inserts should have been evicted.
@@ -271,7 +448,7 @@ mod tests {
     fn errors_are_not_cached() {
         let mut cache = PreviewCache::default();
         let k = key("bad", 1);
-        cache.insert(k.clone(), Arc::new(PreviewContent::Error("nope".into())));
+        drop(cache.insert(k.clone(), Arc::new(PreviewContent::Error("nope".into()))));
         assert!(cache.get(&k).is_none());
     }
 }

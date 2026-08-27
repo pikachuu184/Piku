@@ -378,7 +378,14 @@ impl InspectorPanel {
                         // one guessed from a possibly-stale directory listing.
                         let content = Arc::new(PreviewContent::from(ready.payload));
                         let cache = PikuState::global(cx).preview_cache.clone();
-                        cache.update(cx, |c, _| c.insert(ready.key, content.clone()));
+                        // Not a bare `insert`: whatever this displaces still owns
+                        // a sprite-atlas tile, and only `drop_image` frees it.
+                        crate::services::preview_cache::cache_preview(
+                            &cache,
+                            ready.key,
+                            content.clone(),
+                            cx,
+                        );
                         content
                     }
                     // Superseded or shutting down: the newer request owns the
