@@ -17,8 +17,10 @@ use gpui_component::{
 
 use crate::app::actions::{
     CreateWorkspace, DeleteWorkspace, DuplicateTab, DuplicateWorkspace, NewTab, OpenMediaPanel,
-    PinTab, RemoveRecentPath, RenameWorkspace, RevealPreview, ShowAbout, SplitDown, SplitRight,
-    SwitchWorkspace, ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath, ToggleRightDock,
+    PinTab, PreviewActualSize, PreviewFit, PreviewFitWidth, PreviewNextPage, PreviewPrevPage,
+    PreviewResetView, PreviewRotate, PreviewZoomIn, PreviewZoomOut, RemoveRecentPath,
+    RenameWorkspace, RevealPreview, ShowAbout, SplitDown, SplitRight, SwitchWorkspace,
+    ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath, ToggleRightDock,
 };
 use crate::state::PikuState;
 use crate::state::nav_model::NavModel;
@@ -234,6 +236,31 @@ impl Workspace {
         self.dock_area.update(cx, |dock_area, cx| {
             dock_area.add_panel(Arc::new(panel), DockPlacement::Center, None, window, cx);
         });
+    }
+
+    /// Run `f` on the inspector panel, if the current layout has one.
+    ///
+    /// The preview shortcuts are handled here on the workspace root rather than
+    /// on the panel because gpui resolves actions along the focus path, and while
+    /// browsing it is the file list — a *sibling* of the inspector — that holds
+    /// focus. An `on_action` on the panel could never fire for them. The
+    /// workspace is an ancestor of both, so it can.
+    ///
+    /// The handle is weak and resolved per action: the inspector is built either
+    /// by `reset_default_layout` or by the `register_panel` deserializer, and a
+    /// user can drag it out of the right dock, so nothing here may assume it
+    /// exists.
+    fn with_inspector(
+        cx: &mut App,
+        f: impl FnOnce(&mut InspectorPanel, &mut Context<InspectorPanel>),
+    ) {
+        let Some(panel) = PikuState::global(cx)
+            .inspector()
+            .and_then(|panel| panel.upgrade())
+        else {
+            return;
+        };
+        panel.update(cx, f);
     }
 
     /// Open (or add) a dockable media panel for `path` as a center tab. From
@@ -503,14 +530,48 @@ impl Render for Workspace {
                     dock_area.toggle_dock(DockPlacement::Right, window, cx);
                 });
             }))
-            // Double-clicking a previewable file reveals (never hides) the
-            // inspector dock so the preview is visible immediately.
+            // `space`, or double-clicking a previewable file, reveals (never
+            // hides) the inspector dock so the preview is visible immediately —
+            // and selects the Preview tab, which is the other half of the same
+            // promise. Revealing the dock on the Details tab shows metadata.
             .on_action(cx.listener(|this, _: &RevealPreview, window, cx| {
                 this.dock_area.update(cx, |dock_area, cx| {
                     if !dock_area.is_dock_open(DockPlacement::Right, cx) {
                         dock_area.toggle_dock(DockPlacement::Right, window, cx);
                     }
                 });
+                Self::with_inspector(cx, |panel, cx| panel.show_preview_tab(cx));
+            }))
+            // The preview transform and page navigation. Each of these resolves
+            // the panel and calls one method on it, so the shortcut and the
+            // toolbar button it mirrors run the same code — see the control
+            // surface in `inspector/inspector_panel.rs`.
+            .on_action(cx.listener(|_, _: &PreviewZoomIn, _, cx| {
+                Self::with_inspector(cx, |panel, cx| panel.preview_zoom_by(1.25, cx));
+            }))
+            .on_action(cx.listener(|_, _: &PreviewZoomOut, _, cx| {
+                Self::with_inspector(cx, |panel, cx| panel.preview_zoom_by(0.8, cx));
+            }))
+            .on_action(cx.listener(|_, _: &PreviewFit, _, cx| {
+                Self::with_inspector(cx, |panel, cx| panel.preview_fit(cx));
+            }))
+            .on_action(cx.listener(|_, _: &PreviewFitWidth, _, cx| {
+                Self::with_inspector(cx, |panel, cx| panel.preview_fit_width(cx));
+            }))
+            .on_action(cx.listener(|_, _: &PreviewActualSize, _, cx| {
+                Self::with_inspector(cx, |panel, cx| panel.preview_actual_size(cx));
+            }))
+            .on_action(cx.listener(|_, _: &PreviewResetView, _, cx| {
+                Self::with_inspector(cx, |panel, cx| panel.preview_reset_view(cx));
+            }))
+            .on_action(cx.listener(|_, _: &PreviewRotate, _, cx| {
+                Self::with_inspector(cx, |panel, cx| panel.preview_rotate(cx));
+            }))
+            .on_action(cx.listener(|_, _: &PreviewNextPage, _, cx| {
+                Self::with_inspector(cx, |panel, cx| panel.preview_step_page(1, cx));
+            }))
+            .on_action(cx.listener(|_, _: &PreviewPrevPage, _, cx| {
+                Self::with_inspector(cx, |panel, cx| panel.preview_step_page(-1, cx));
             }))
             .on_action(cx.listener(|this, action: &OpenMediaPanel, window, cx| {
                 this.open_media_panel(action.0.clone(), window, cx);

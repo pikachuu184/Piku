@@ -20,6 +20,7 @@ use crate::state::nav_model::NavModel;
 use crate::state::settings::Settings;
 use crate::state::workspaces::WorkspaceStore;
 use crate::ui::explorer::ExplorerPanel;
+use crate::ui::inspector::InspectorPanel;
 use crate::ui::sidebar::NavPanel;
 
 /// What the active pane currently has selected; the inspector and status bar
@@ -59,6 +60,13 @@ pub struct PikuState {
     pub git: Entity<GitStore>,
     active_explorer: RefCell<Option<WeakEntity<ExplorerPanel>>>,
     nav_panel: RefCell<Option<WeakEntity<NavPanel>>>,
+    /// The right dock's inspector, so the preview shortcuts can reach it.
+    ///
+    /// They are bound globally and handled on the workspace root, because gpui
+    /// resolves actions along the focus path and the inspector is a *sibling* of
+    /// whatever holds focus while browsing. The panel registers itself from
+    /// `Panel::on_added_to`, same as the two above.
+    inspector: RefCell<Option<WeakEntity<InspectorPanel>>>,
 }
 
 impl Global for PikuState {}
@@ -104,6 +112,7 @@ impl PikuState {
             git,
             active_explorer: RefCell::new(None),
             nav_panel: RefCell::new(None),
+            inspector: RefCell::new(None),
         });
     }
 
@@ -130,5 +139,13 @@ impl PikuState {
 
     pub fn nav_panel(&self) -> Option<WeakEntity<NavPanel>> {
         self.nav_panel.borrow().clone()
+    }
+
+    pub fn set_inspector(&self, panel: WeakEntity<InspectorPanel>) {
+        *self.inspector.borrow_mut() = Some(panel);
+    }
+
+    pub fn inspector(&self) -> Option<WeakEntity<InspectorPanel>> {
+        self.inspector.borrow().clone()
     }
 }

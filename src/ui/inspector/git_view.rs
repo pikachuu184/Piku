@@ -18,6 +18,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use crate::app::assets::PikuIcon;
 
 use crate::core::entry::EntryKind;
+use crate::security::text::sanitize_path;
 use crate::services::git::COMMIT_PAGE;
 use crate::services::git::types::{CommitDetail, CommitInfo, GitStatusCode};
 use crate::state::PikuState;
@@ -581,7 +582,7 @@ pub(super) fn render_git(
                 let diff_key = format!(
                     "{}:{}",
                     if stage_action { "worktree" } else { "staged" },
-                    rel.display()
+                    rel.display() // raw-path-ok: cache key, never rendered
                 );
                 section = section.child(
                     h_flex()
@@ -611,7 +612,7 @@ pub(super) fn render_git(
                                 .text_xs()
                                 .text_color(cx.theme().foreground)
                                 .truncate()
-                                .child(rel.display().to_string()),
+                                .child(sanitize_path(rel)),
                         )
                         .child(
                             div()
@@ -778,7 +779,7 @@ pub(super) fn render_git(
         if let (Some(rel), Some(status)) = (file_rel.clone(), file_status)
             && status.worktree.is_some()
         {
-            let key = format!("worktree:{}", rel.display());
+            let key = format!("worktree:{}", rel.display()); // raw-path-ok: cache key, never rendered
             let active = this.git.diff_key.as_deref() == Some(key.as_str());
             section = section.child(
                 div()
@@ -965,7 +966,7 @@ fn commit_row(
 
     if let Some(rel) = file_rel {
         // File-history mode: show what this commit did to the file.
-        let key = format!("commit:{}:{}", commit.id, rel.display());
+        let key = format!("commit:{}:{}", commit.id, rel.display()); // raw-path-ok: cache key, never rendered
         row = row.on_click(cx.listener(move |this, _, _, cx| {
             this.load_diff(
                 root_for_click.clone(),

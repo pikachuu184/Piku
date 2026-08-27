@@ -117,6 +117,23 @@ pub fn sanitize_label(raw: &str) -> String {
     sanitize_display(raw, LABEL_CAP, false)
 }
 
+/// Cap for a rendered filesystem path. Longer than [`LABEL_CAP`] because a
+/// path is many names joined. Matches `audit::MAX_PATH_CHARS`, so a path is
+/// bounded the same way whether it is being logged or drawn.
+pub const PATH_CAP: usize = 4096;
+
+/// Sanitize a filesystem path for display.
+///
+/// [`crate::core::entry::FsEntry::name`] is cleaned once at construction, but
+/// the path deliberately is not — it keeps the real bytes, because it is what
+/// gets opened. So every place that *renders* a path has to clean it here
+/// instead, and a path is the more exposed of the two: it carries every
+/// ancestor directory's name as well, which means one hostile component
+/// upstream reorders the row for every file beneath it.
+pub fn sanitize_path(path: &std::path::Path) -> String {
+    sanitize_display(&path.to_string_lossy(), PATH_CAP, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +241,23 @@ mod tests {
         let clean = sanitize_display(&long, 10, false);
         assert_eq!(clean.chars().count(), 11, "10 chars plus the ellipsis");
         assert!(clean.ends_with('…'));
+    }
+
+    /// A hostile *directory* is worse than a hostile file: it reorders the
+    /// rendered path of every file beneath it, and the inspector's Location
+    /// row is where a full path is most prominent.
+    #[test]
+    fn a_hostile_path_component_is_neutralized() {
+        let path = std::path::Path::new("/home/u/inv\u{202E}gpj.exe/report.pdf");
+        let clean = sanitize_path(path);
+        assert_eq!(clean, "/home/u/invgpj.exe/report.pdf");
+        assert!(!clean.contains('\u{202E}'));
+    }
+
+    #[test]
+    fn an_ordinary_path_is_untouched() {
+        let path = std::path::Path::new("/home/u/Documents/報告書.pdf");
+        assert_eq!(sanitize_path(path), "/home/u/Documents/報告書.pdf");
     }
 
     #[test]

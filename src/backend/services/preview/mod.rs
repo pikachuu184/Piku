@@ -14,6 +14,7 @@
 
 pub mod content;
 pub mod decode;
+pub mod frame;
 pub mod language;
 pub mod markdown_safe;
 pub mod probe;
@@ -29,6 +30,7 @@ use crate::backend::protocol::Cancel;
 use crate::core::entry::{EntryKind, FsEntry};
 use content::PreviewPayload;
 
+pub use frame::FrameSpec;
 pub use service::{
     PreviewKey, PreviewRequest, PreviewService, THUMB_TARGET, ThumbKey, ThumbRequest, ThumbSource,
 };

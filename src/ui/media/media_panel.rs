@@ -186,7 +186,7 @@ impl MediaPanel {
                             .on_click(cx.listener(move |_, _, window, cx| {
                                 let name = open_path
                                     .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .map(|n| n.to_string_lossy().into_owned()) // raw-path-ok: shell_open sanitizes it
                                     .unwrap_or_default();
                                 crate::ui::explorer::shell_open(&name, &open_path, window, cx);
                             })),

@@ -5,11 +5,12 @@
 //! container. So `size_full()` means the panel, and a block sizes itself one of
 //! two ways:
 //!
-//! - **Fills**: image, code, structured tree, video poster. `flex_1().min_h_0()`
-//!   for the content, `flex_none` for any toolbar or banner above or below it.
-//! - **Scrolls**: hex rows, archive listings, media metadata, PDF pages, diffs.
-//!   These are as tall as their content, so [`scroll_fill`] gives them the
-//!   scroll container and the padding the tab itself does not provide.
+//! - **Fills**: image, PDF page, code, structured tree, video poster.
+//!   `flex_1().min_h_0()` for the content, `flex_none` for any toolbar or banner
+//!   above or below it.
+//! - **Scrolls**: hex rows, archive listings, media metadata, diffs. These are
+//!   as tall as their content, so [`scroll_fill`] gives them the scroll container
+//!   and the padding the tab itself does not provide.
 //!
 //! There is deliberately no `fill_height(window)`-style guess any more. Deriving
 //! a height from the window was wrong by the height of the media bar whenever
@@ -43,14 +44,156 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::app::assets::PikuIcon;
+use crate::backend::services::preview::FrameSpec;
 use crate::backend::services::preview::providers::image::PREVIEW_MAX_EDGE;
 use crate::core::format::format_size;
 use crate::preview::content::{ArchiveItem, HexRow, PreviewContent, PreviewImage};
-use crate::ui::inspector::inspector_panel::{CodeSyncKey, ImageZoom, InspectorPanel, fit_scale};
+use crate::ui::inspector::inspector_panel::{CodeSyncKey, InspectorPanel};
+use crate::ui::inspector::viewport::ImageZoom;
 
 /// Archive listings render at most this many rows (the loader already caps
 /// what it reads; this caps what the non-virtualized panel draws).
 const ARCHIVE_ROWS_SHOWN: usize = 200;
+
+// -- The controller dispatch ------------------------------------------------
+
+/// What a preview surface can do.
+///
+/// One declaration per surface. The body reads these directly —
+/// [`zoomable_surface`] gates the wheel on `zoomable` and the drag on `pannable`
+/// — and the toolbar half is held to them by
+/// `a_surface_that_can_be_acted_on_offers_controls`, which fails if a surface
+/// claims something the user can act on and [`controls_for`] gives them nowhere
+/// to act on it. So every flag here gates real behaviour or is asserted against
+/// real behaviour. A flag that does neither is a claim rather than a capability,
+/// and three of them used to be exactly that.
+///
+/// Two the request named are deliberately absent, because nothing here could
+/// enforce them: `playable` has no state to gate — the audio and video blocks
+/// render their transport unconditionally and there is no such thing as audio
+/// that does not play — and text selection belongs to `InputState`, which owns
+/// it. This is the table both land in the moment there is behaviour to gate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) struct Capabilities {
+    /// Has a scale the user can change.
+    pub zoomable: bool,
+    /// Can be dragged around inside its viewport.
+    pub pannable: bool,
+    /// Is a sequence of pages the user can step through.
+    pub paginated: bool,
+    /// Offers alternative renderings of the same bytes (raw/rendered,
+    /// tree/pretty/raw).
+    pub switchable: bool,
+}
+
+/// The kinds of preview surface, one per way of drawing a file.
+///
+/// This exists so [`render_preview_box`] and [`preview_actions`] start from the
+/// same value instead of matching [`PreviewContent`] separately. They did, and
+/// they drifted: the PDF block had `pages` and `total_pages` from the day it was
+/// written, while the toolbar's match fell through to `_ => None`, so there was
+/// no way to reach page two. Both now call [`Self::of`] on the same content, and
+/// every match over [`PreviewContent`] in this file is exhaustive with no
+/// catch-all — so a new content type cannot be added without deciding both how
+/// it draws and what it lets the user do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum PreviewSurface {
+    Image,
+    Code,
+    Markdown,
+    Structured,
+    Archive,
+    Audio,
+    Video,
+    Pdf,
+    Hex,
+    Diff,
+    /// A sentence in a box: too large, or an error.
+    Message,
+}
+
+impl PreviewSurface {
+    pub fn of(content: &PreviewContent) -> Self {
+        match content {
+            PreviewContent::Image { .. } => Self::Image,
+            PreviewContent::Code { .. } => Self::Code,
+            PreviewContent::Markdown { .. } => Self::Markdown,
+            PreviewContent::Structured { .. } => Self::Structured,
+            PreviewContent::Archive { .. } => Self::Archive,
+            PreviewContent::Audio { .. } => Self::Audio,
+            PreviewContent::Video { .. } => Self::Video,
+            PreviewContent::Pdf { .. } => Self::Pdf,
+            PreviewContent::Hex { .. } => Self::Hex,
+            PreviewContent::Diff(_) => Self::Diff,
+            PreviewContent::TooLarge { .. } | PreviewContent::Error(_) => Self::Message,
+        }
+    }
+
+    /// Every variant, for table tests. Adding one without extending this fails
+    /// `every_surface_names_its_control_group`.
+    ///
+    /// `allow`, not `expect`: exercised by the tests below but not by the
+    /// binary, so an expectation would be unfulfilled in the test target. Same
+    /// reasoning as `PreviewKind::ALL` on the provider side.
+    #[allow(dead_code, reason = "table-test vocabulary")]
+    pub const ALL: [PreviewSurface; 11] = [
+        Self::Image,
+        Self::Code,
+        Self::Markdown,
+        Self::Structured,
+        Self::Archive,
+        Self::Audio,
+        Self::Video,
+        Self::Pdf,
+        Self::Hex,
+        Self::Diff,
+        Self::Message,
+    ];
+
+    pub fn capabilities(self) -> Capabilities {
+        match self {
+            // The image and the PDF page share one set of flags because they
+            // share one engine. `viewport.rs`'s module doc has said so from the
+            // start; this is where it became true. `Pdf` used to claim
+            // `paginated` alone, which is why the page drew through a plain
+            // `ObjectFit::Contain` and neither wheel nor drag reached it.
+            Self::Image | Self::Pdf => Capabilities {
+                zoomable: true,
+                pannable: true,
+                paginated: matches!(self, Self::Pdf),
+                switchable: false,
+            },
+            Self::Markdown | Self::Structured => Capabilities {
+                switchable: true,
+                ..Capabilities::default()
+            },
+            // One way of drawing, nothing to steer.
+            Self::Code
+            | Self::Archive
+            | Self::Audio
+            | Self::Video
+            | Self::Hex
+            | Self::Diff
+            | Self::Message => Capabilities::default(),
+        }
+    }
+
+    /// Whether this surface may draw controls in the tab bar's suffix.
+    ///
+    /// "May", not "does": a structured document with nothing to switch between
+    /// — no pretty form, and too truncated to build a tree — correctly draws
+    /// none, and so does a PDF with no decodable page. This is the upper bound,
+    /// and the assertion that matters is the other direction: a surface that
+    /// claims a capability the user can act on must offer somewhere to act on
+    /// it. `a_surface_that_can_be_acted_on_offers_controls` is that assertion.
+    ///
+    /// `allow` for the same reason as [`Self::ALL`]: the tests are the caller.
+    #[allow(dead_code, reason = "asserted by the control-table tests")]
+    pub fn may_have_controls(self) -> bool {
+        let capabilities = self.capabilities();
+        capabilities.zoomable || capabilities.paginated || capabilities.switchable
+    }
+}
 
 /// Render the loaded preview. Caller guarantees `panel.loaded` is `Some` and
 /// matches the selected entry.
@@ -59,13 +202,28 @@ pub(super) fn render_preview_box(
     window: &mut Window,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
-    // Take/put-back so the content can be borrowed while the panel is
-    // mutated (code-editor sync, view toggles).
-    let Some(loaded) = panel.loaded.take() else {
+    // An `Arc` bump and a path clone, so the content can be borrowed while the
+    // panel is mutated (code-editor sync, view toggles).
+    //
+    // This used to take the whole `loaded` and put it back at the end, which
+    // left `panel.loaded` as `None` for the entire body — so a block that asked
+    // the panel about the file it was drawing (`drawn_metrics`, `drawn_frame`,
+    // `has_own_pixels`) got the answer "there is no file", and one early return
+    // anywhere in here would have dropped the preview on the floor.
+    let Some((content, path)) = panel
+        .loaded
+        .as_ref()
+        .map(|loaded| (loaded.content.clone(), loaded.path.clone()))
+    else {
         return div().into_any_element();
     };
-    let element = match &*loaded.content {
-        PreviewContent::Image { source, dimensions } => image_block(panel, source, *dimensions, cx),
+    // Derived once, here, and handed to the blocks that need it. A block that
+    // named its own surface would be one more place for the body and the
+    // capability table to disagree, which is the whole failure this dispatch
+    // exists to prevent.
+    let surface = PreviewSurface::of(&content);
+    match &*content {
+        PreviewContent::Image { source, .. } => image_block(panel, surface, source, cx),
         PreviewContent::Code {
             text,
             language,
@@ -77,7 +235,7 @@ pub(super) fn render_preview_box(
             .child(code_editor_block(
                 panel,
                 CodeSyncKey {
-                    path: loaded.path.clone(),
+                    path: path.clone(),
                     variant: "code",
                 },
                 text,
@@ -87,7 +245,7 @@ pub(super) fn render_preview_box(
             ))
             .into_any_element(),
         PreviewContent::Markdown { source, truncated } => {
-            markdown_block(panel, &loaded.path, source, *truncated, window, cx)
+            markdown_block(panel, &path, source, *truncated, window, cx)
         }
         PreviewContent::Structured {
             text,
@@ -96,7 +254,7 @@ pub(super) fn render_preview_box(
             truncated,
         } => structured_block(
             panel,
-            &loaded.path,
+            &path,
             text,
             *language,
             pretty.as_ref(),
@@ -119,17 +277,13 @@ pub(super) fn render_preview_box(
             duration_ms,
         } => scroll_fill(
             "pv-audio-scroll",
-            audio_block(&loaded.path, rows, waveform, *duration_ms, cx),
+            audio_block(&path, rows, waveform, *duration_ms, cx),
             cx,
         ),
-        PreviewContent::Video { rows, poster } => {
-            video_block(&loaded.path, rows, poster.clone(), cx)
+        PreviewContent::Video { rows, poster } => video_block(&path, rows, poster.clone(), cx),
+        PreviewContent::Pdf { pages, note, .. } => {
+            pdf_block(panel, surface, pages, note.as_ref(), cx)
         }
-        PreviewContent::Pdf {
-            pages,
-            total_pages,
-            note,
-        } => pdf_block(panel, pages, *total_pages, note.as_ref(), cx),
         PreviewContent::Hex {
             rows,
             signature,
@@ -144,9 +298,7 @@ pub(super) fn render_preview_box(
         }
         PreviewContent::Diff(payload) => scroll_fill("pv-diff-scroll", diff_block(payload, cx), cx),
         PreviewContent::Error(message) => message_box(message.to_string(), cx),
-    };
-    panel.loaded = Some(loaded);
-    element
+    }
 }
 
 // -- Tab-bar actions --------------------------------------------------------
@@ -157,8 +309,11 @@ pub(super) fn render_preview_box(
 /// They used to be a strip inside each block — a toggle row above markdown and
 /// structured data, a button row under the image. Hoisting them here means the
 /// preview surface itself is nothing but content, edge to edge, and that the
-/// controls land in the same place whatever the file is. Returns `None` for
-/// content that has nothing to configure (hex, archive, audio, video, PDF).
+/// controls land in the same place whatever the file is.
+///
+/// The dispatch is [`controls_for`], which is exhaustive over
+/// [`PreviewContent`]. The `_ => None` it replaced is exactly how PDF ended up
+/// with pages and no way to turn them.
 pub(super) fn preview_actions(
     panel: &InspectorPanel,
     cx: &mut Context<InspectorPanel>,
@@ -174,14 +329,87 @@ pub(super) fn preview_actions(
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
 
-    match &*content {
-        PreviewContent::Markdown { .. } => Some(markdown_actions(panel, cx)),
+    let surface = PreviewSurface::of(&content);
+    match controls_for(&content, &ext) {
+        // The image and the PDF page share the zoom row because they share the
+        // viewport behind it; the PDF adds its page counter in front.
+        PreviewControls::Image => Some(zoom_controls(panel, surface, cx)),
+        PreviewControls::Pdf { total_pages } => Some(pdf_actions(panel, surface, total_pages, cx)),
+        PreviewControls::Markdown => Some(markdown_actions(panel, cx)),
+        PreviewControls::Structured {
+            tree_capable,
+            has_pretty,
+        } => Some(structured_actions(panel, tree_capable, has_pretty, cx)),
+        PreviewControls::None => None,
+    }
+}
+
+/// Which toolbar a preview gets, and the facts that toolbar needs.
+///
+/// One decision, made in one place, answering both "is there a toolbar?" and
+/// "what is in it?". Those used to be two matches — one over [`PreviewSurface`]
+/// in [`preview_actions`], another buried inside each builder — and the second
+/// could contradict the first: `structured_actions` returned `Option` so it
+/// could decide, five arguments deep, that there was nothing to switch between.
+///
+/// Exhaustive over [`PreviewContent`] with no catch-all, so a new content type
+/// cannot be added without deciding what it lets the user do.
+pub(super) fn controls_for(content: &PreviewContent, ext: &str) -> PreviewControls {
+    match content {
+        // Including SVG, whose buttons are all disabled but present: the row
+        // vanishing between one image and the next is worse than a dim row.
+        PreviewContent::Image { .. } => PreviewControls::Image,
+        PreviewContent::Pdf {
+            pages, total_pages, ..
+        } => match pages.is_empty() {
+            // No decodable first page — pdfium missing, or the document past the
+            // page cap. That is a message box, and a message has no pages.
+            true => PreviewControls::None,
+            false => PreviewControls::Pdf {
+                total_pages: *total_pages,
+            },
+        },
+        PreviewContent::Markdown { .. } => PreviewControls::Markdown,
         PreviewContent::Structured {
             pretty, truncated, ..
-        } => structured_actions(panel, &ext, pretty.is_some(), *truncated, cx),
-        PreviewContent::Image { dimensions, .. } => Some(image_actions(panel, *dimensions, cx)),
-        _ => None,
+        } => {
+            let tree_capable = structured_tree_capable(ext, *truncated);
+            let has_pretty = pretty.is_some();
+            match tree_capable || has_pretty {
+                true => PreviewControls::Structured {
+                    tree_capable,
+                    has_pretty,
+                },
+                // Neither a tree nor a pretty form: one rendering, so a "Raw
+                // source" toggle would be a button that toggles nothing.
+                false => PreviewControls::None,
+            }
+        }
+        PreviewContent::Code { .. }
+        | PreviewContent::Archive { .. }
+        | PreviewContent::Audio { .. }
+        | PreviewContent::Video { .. }
+        | PreviewContent::Hex { .. }
+        | PreviewContent::Diff(_)
+        | PreviewContent::TooLarge { .. }
+        | PreviewContent::Error(_) => PreviewControls::None,
     }
+}
+
+/// The outcome of [`controls_for`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum PreviewControls {
+    Image,
+    Pdf {
+        total_pages: usize,
+    },
+    Markdown,
+    Structured {
+        tree_capable: bool,
+        has_pretty: bool,
+    },
+    /// Nothing to steer: one way of drawing, or a degenerate document.
+    None,
 }
 
 fn markdown_actions(panel: &InspectorPanel, cx: &mut Context<InspectorPanel>) -> AnyElement {
@@ -207,19 +435,17 @@ fn markdown_actions(panel: &InspectorPanel, cx: &mut Context<InspectorPanel>) ->
         .into_any_element()
 }
 
+/// The raw/pretty/tree toggles, for the tab bar's suffix.
+///
+/// Both flags come from [`controls_for`], which has already established that at
+/// least one of them is true — so this always has something to draw and returns
+/// an element rather than an `Option`.
 fn structured_actions(
     panel: &InspectorPanel,
-    ext: &str,
+    tree_capable: bool,
     has_pretty: bool,
-    truncated: bool,
     cx: &mut Context<InspectorPanel>,
-) -> Option<AnyElement> {
-    // A tree needs a fully-parsed document, so it is only offered for the
-    // formats we can parse and only when the head was not truncated.
-    let tree_capable = structured_tree_capable(ext, truncated);
-    if !tree_capable && !has_pretty {
-        return None;
-    }
+) -> AnyElement {
     let tree_active = tree_capable && panel.view.structured_tree;
     let pretty_active = !tree_active && panel.view.json_pretty && has_pretty;
 
@@ -268,7 +494,7 @@ fn structured_actions(
             |view| view.structured_tree = false,
         ));
     }
-    Some(row.into_any_element())
+    row.into_any_element()
 }
 
 /// Shared by the actions row and the block itself, so the toggle can never
@@ -603,37 +829,88 @@ fn scalar_label(value: &serde_json::Value) -> String {
 // -- Image ------------------------------------------------------------------
 
 fn image_block(
-    panel: &mut InspectorPanel,
+    panel: &InspectorPanel,
+    surface: PreviewSurface,
     image: &PreviewImage,
-    dimensions: Option<(u32, u32)>,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
-    // SVG has no pixel size of its own, so there is nothing to be 1:1 *with*;
-    // it stays fitted and the renderer rasterizes it at whatever size it lands.
-    let sizeable = dimensions.is_some();
-    let zoom = if sizeable {
-        panel.view.image_zoom
-    } else {
-        ImageZoom::Fit
-    };
-    // Measured last frame. `None` on the very first frame for a given panel
-    // size — which is exactly why fitted mode does not depend on it.
-    let fitted = dimensions.and_then(|d| fit_scale(panel.preview_viewport.get(), d));
-
-    // A path clone or an `Arc` bump. Never a re-read, and never a re-decode:
-    // for anything but SVG the pixels were decoded on a worker, with the
-    // orientation already applied.
-    let source: ImageSource = match image {
-        PreviewImage::Path(path) => ImageSource::from(path.clone()),
-        PreviewImage::Decoded(frame) => ImageSource::Render(frame.clone()),
+    // The turned frame when one has arrived for this file, otherwise the payload
+    // the loader cached. `drawn_frame` keys on the path alone, not on the exact
+    // turn, so the image holds the angle you last chose while the next one
+    // renders — half a second of the previous angle beats half a second of
+    // nothing, and unlike the PDF's page counter there is no label here that
+    // could be wrong about it.
+    //
+    // Either arm is a path clone or an `Arc` bump. Never a re-read, and never a
+    // re-decode in the UI: for anything but SVG the pixels were decoded on a
+    // worker, with the orientation already applied.
+    let source: ImageSource = match panel.drawn_frame() {
+        Some(frame) => ImageSource::Render(frame.image.clone()),
+        None => match image {
+            PreviewImage::Path(path) => ImageSource::from(path.clone()),
+            PreviewImage::Decoded(frame) => ImageSource::Render(frame.clone()),
+        },
     };
 
-    let content: AnyElement = if zoom.is_fit() {
-        // Fitted mode is the renderer's own `Contain`, not a scale we compute.
-        // It needs no measurement, so it is correct on the first frame and
-        // stays correct while the dock is being dragged — a computed scale
-        // would be one frame behind for the whole drag.
-        div()
+    v_flex()
+        .size_full()
+        .child(zoomable_surface(
+            panel,
+            source,
+            Backdrop::Checker,
+            surface.capabilities(),
+            cx,
+        ))
+        .into_any_element()
+}
+
+/// What sits behind the pixels in a [`zoomable_surface`].
+enum Backdrop {
+    /// The two-gray transparency checkerboard, for an image that may have an
+    /// alpha channel.
+    Checker,
+    /// A flat muted fill, for a PDF page. Paper is opaque, and a checkerboard
+    /// behind a white page reads as damage rather than as transparency.
+    Flat,
+}
+
+/// One zoomable, pannable viewport — the image and the PDF page both draw here.
+///
+/// This is the function `viewport.rs`'s module doc has described from the start.
+/// It was not true: the PDF page had its own `ObjectFit::Contain` div, so Fit,
+/// Fit Width, Actual Size, wheel zoom and drag pan reached the image and stopped
+/// there. Both callers now hand their pixels to this, and what is enabled comes
+/// from `capabilities` — which is what makes the capability table load-bearing
+/// instead of decorative.
+///
+/// Returns a `flex_1` element, so **every caller must wrap it in a flex column**.
+/// `flex_1` with no flex parent is given a share of nothing and resolves to zero
+/// height, which draws nothing and leaves a zero-sized hitbox that silently
+/// swallows the wheel.
+fn zoomable_surface(
+    panel: &InspectorPanel,
+    source: ImageSource,
+    backdrop: Backdrop,
+    capabilities: Capabilities,
+    cx: &mut Context<InspectorPanel>,
+) -> AnyElement {
+    // `None` when there is no geometry to anchor a gesture against: an SVG, which
+    // has no pixel size of its own and so nothing to be 1:1 *with*, or a box the
+    // renderer has not measured yet. Both gestures need it, so both wait for it —
+    // this is the honest reading of the `let sizeable = dimensions.is_some()`
+    // that used to stand in for the capability table here.
+    let metrics = panel.drawn_metrics();
+    let can_zoom = capabilities.zoomable && metrics.is_some();
+    let can_pan = capabilities.pannable && metrics.is_some();
+
+    // Untouched, or not yet measured: hand it to the renderer's own `Contain`.
+    // That needs no measurement, so it is correct on the very first frame and
+    // stays correct while the dock is being dragged, where a computed scale
+    // would be one frame behind for the whole of the drag.
+    let transformed = metrics.filter(|_| !panel.view.viewport.is_untransformed());
+
+    let content: AnyElement = match transformed {
+        None => div()
             .absolute()
             .inset_0()
             .flex()
@@ -646,37 +923,46 @@ fn image_block(
                     .max_h_full()
                     .object_fit(ObjectFit::Contain),
             )
-            .into_any_element()
-    } else {
-        // 1:1 / zoomed: explicit size inside a scrollable viewport. The scroll
-        // handle is tracked so zoom can read and rewrite the offset — that is
-        // what keeps the point under the cursor from drifting.
-        let (w, h) = dimensions.unwrap_or((0, 0));
-        let scale = effective_scale(zoom.scale(fitted).unwrap_or(1.0), (w, h));
-        div()
-            .absolute()
-            .inset_0()
-            .id("pv-image-pan")
-            .track_scroll(&panel.pan_scroll)
-            .overflow_x_scroll()
-            .overflow_y_scroll()
-            .child(
-                img(source.clone())
-                    .w(px(w as f32 * scale))
-                    .h(px(h as f32 * scale))
-                    .flex_none(),
-            )
-            .into_any_element()
+            .into_any_element(),
+        Some(metrics) => {
+            // Explicitly sized and explicitly offset. Centring is the flex
+            // parent's job and `pan` displaces it from there, so zero pan is
+            // centred at *every* scale — which is what the scroll container
+            // this replaced could not express (see `viewport.rs`).
+            let scale = panel
+                .view
+                .viewport
+                .effective_scale(Some(metrics))
+                .unwrap_or(1.0);
+            let (width, height) = metrics.displayed();
+            let pan = panel.view.viewport.pan;
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .overflow_hidden()
+                .child(
+                    img(source.clone())
+                        .flex_none()
+                        .relative()
+                        .left(pan.x)
+                        .top(pan.y)
+                        .w(px(width as f32 * scale))
+                        .h(px(height as f32 * scale)),
+                )
+                .into_any_element()
+        }
     };
 
-    // `size_full`, not `flex_1`: with the controls moved to the tab bar this
-    // element IS the tab, and its parent is a plain block. `flex_1` needs a
-    // flex parent to be given a share of anything — without one it resolves to
-    // zero height, which renders nothing and leaves a zero-sized hitbox that
-    // silently swallows the wheel.
-    let viewport = div()
+    let viewport_box = div()
         .relative()
-        .size_full()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .overflow_hidden();
+    let viewport_box = match backdrop {
         // The transparency backdrop, in the same two monochrome grays as
         // before. This used to be a hand-painted canvas whose loop was capped
         // at 120 cells per axis — 960 px, which never mattered while the box
@@ -687,164 +973,216 @@ fn image_block(
         // The shader paints its colour on alternating cells and leaves the
         // rest transparent, so the two grays are two layers — the base here,
         // the pattern over it.
-        .bg(crate::theme::solid(crate::theme::CHECKER_A))
-        .overflow_hidden()
-        .child(div().absolute().inset_0().bg(gpui::checkerboard(
-            crate::theme::solid(crate::theme::CHECKER_B),
-            CHECKER_CELL_PX,
-        )))
+        Backdrop::Checker => viewport_box
+            .bg(crate::theme::solid(crate::theme::CHECKER_A))
+            .child(div().absolute().inset_0().bg(gpui::checkerboard(
+                crate::theme::solid(crate::theme::CHECKER_B),
+                CHECKER_CELL_PX,
+            ))),
+        Backdrop::Flat => viewport_box.bg(cx.theme().muted),
+    };
+
+    let viewport = viewport_box
         .child(content)
-        // The wheel always zooms over the image. It used to zoom only while
-        // fitted, which meant the first notch worked and every one after it
-        // silently became a pan — indistinguishable from "zoom is broken".
-        // This is a viewer, not a document: panning is click-drag, below.
-        .when(sizeable, |el| {
+        // Ctrl/Cmd + wheel zooms toward the cursor; a plain wheel pans, and
+        // shift makes it pan sideways. This is the convention Zed's image
+        // viewer uses and the one every document viewer uses.
+        //
+        // It replaced an unconditional zoom, which was itself a fix for a
+        // version that zoomed only while fitted — where the first notch worked
+        // and every one after it silently became a pan. The modifier settles
+        // that properly: both gestures now work at every zoom level, and which
+        // one you get is something you chose rather than something the current
+        // state decided for you.
+        //
+        // One handler, two capabilities: it is attached when either gesture is
+        // available and each branch checks its own, so a surface that could pan
+        // but not zoom would still answer the wheel.
+        .when(can_zoom || can_pan, |el| {
             el.on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
-                let dy = event.delta.pixel_delta(px(16.)).y;
-                if dy == px(0.) {
-                    return;
+                let delta = event.delta.pixel_delta(px(16.));
+                if event.modifiers.control || event.modifiers.platform {
+                    if !can_zoom || delta.y == px(0.) {
+                        return;
+                    }
+                    let factor = if delta.y > px(0.) { 1.25 } else { 0.8 };
+                    this.view
+                        .viewport
+                        .zoom_about(event.position, factor, metrics);
+                } else if can_pan {
+                    // A wheel with no horizontal axis still pans sideways when
+                    // shift is held, which is how a mouse reaches a wide image.
+                    let pan = match event.modifiers.shift && delta.x == px(0.) {
+                        true => gpui::point(delta.y, px(0.)),
+                        false => delta,
+                    };
+                    if pan.x == px(0.) && pan.y == px(0.) {
+                        return;
+                    }
+                    this.view.viewport.pan_by(pan, metrics);
                 }
-                let factor = if dy > px(0.) { 1.25 } else { 0.8 };
-                this.zoom_about(event.position, factor, fitted, dimensions);
                 cx.notify();
             }))
         })
-        // Click-drag pans, which is what the wheel used to do. `MouseMoveEvent`
-        // carries no delta, so the previous position is kept on the panel and
-        // differenced here; `dragging()` keeps a plain click from nudging it.
-        .when(sizeable, |el| {
+        // Click-drag pans. `MouseMoveEvent` carries no delta, so the previous
+        // position is kept on the viewport and differenced here; `dragging()`
+        // keeps a plain click from nudging it.
+        .when(can_pan, |el| {
             el.on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, _| {
-                    this.drag_from = Some(event.position);
+                    this.view.viewport.drag_from = Some(event.position);
                 }),
             )
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _: &gpui::MouseUpEvent, _, _| {
-                    this.drag_from = None;
+                    this.view.viewport.drag_from = None;
                 }),
             )
             .on_mouse_move(cx.listener(
                 move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                    if !event.dragging() || this.view.image_zoom.is_fit() {
-                        this.drag_from = None;
+                    if !event.dragging() {
+                        this.view.viewport.drag_from = None;
                         return;
                     }
-                    let Some(from) = this.drag_from.replace(event.position) else {
+                    let Some(from) = this.view.viewport.drag_from.replace(event.position) else {
                         return;
                     };
-                    // Scroll offsets run negative as content moves up and left,
-                    // so dragging right (+x) moves the offset toward zero.
-                    let offset = this.pan_scroll.offset();
-                    this.pan_scroll.set_offset(gpui::point(
-                        offset.x + (event.position.x - from.x),
-                        offset.y + (event.position.y - from.y),
-                    ));
+                    // Unconditional, unlike the version this replaced, which
+                    // refused to drag while fitted. The clamp already pins an
+                    // axis with nothing to pan to, so a drag that cannot move
+                    // anything now simply does not move anything.
+                    this.view.viewport.pan_by(
+                        gpui::point(event.position.x - from.x, event.position.y - from.y),
+                        metrics,
+                    );
                     cx.notify();
                 },
             ))
         });
 
     // No control strip: the controls live in the tab bar's suffix now, so the
-    // image is the entire tab.
+    // pixels are the entire tab.
     viewport.into_any_element()
 }
 
-/// The image controls, for the tab bar's suffix.
-fn image_actions(
+/// The zoom, rotate and readout controls, for the tab bar's suffix.
+///
+/// Shared by the image and the PDF page because they share the viewport behind
+/// them. Every button calls an [`InspectorPanel`] method rather than touching
+/// the viewport here — the *same* method its keyboard shortcut calls, so the two
+/// cannot drift apart, and each one anchors on the viewport centre. Assigning
+/// the level and leaving the pan alone is what made button zoom drift while
+/// wheel zoom did not.
+///
+/// `surface` decides one thing: whether the pixels on screen can be fewer than
+/// the size the readout names. See the `limited` marker below.
+fn zoom_controls(
     panel: &InspectorPanel,
-    dimensions: Option<(u32, u32)>,
+    surface: PreviewSurface,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
-    let sizeable = dimensions.is_some();
-    let zoom = if sizeable {
-        panel.view.image_zoom
-    } else {
-        ImageZoom::Fit
-    };
-    let fitted = dimensions.and_then(|d| fit_scale(panel.preview_viewport.get(), d));
+    let zoom = panel.view.viewport.zoom;
+    let dimensions = panel.drawn_dimensions();
+    let metrics = panel.drawn_metrics();
+    // False for exactly one previewable thing: an SVG. It has no pixel size of
+    // its own, so there is nothing to be 1:1 with, nothing to fit a width
+    // against, and nothing here for a worker to turn.
+    let sizeable = panel.has_own_pixels();
 
     let mut row = h_flex()
         .gap_1()
         .items_center()
         .child(
-            Button::new("pv-img-fit")
+            Button::new("pv-zoom-fit")
                 .ghost()
                 .xsmall()
                 .icon(PikuIcon::Maximize)
                 .tooltip("Fit to window")
-                .selected(zoom.is_fit())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.view.image_zoom = ImageZoom::Fit;
-                    cx.notify();
-                })),
+                .selected(zoom == ImageZoom::Fit)
+                .on_click(cx.listener(move |this, _, _, cx| this.preview_fit(cx))),
         )
         .child(
-            Button::new("pv-img-actual")
+            Button::new("pv-zoom-fit-width")
+                .ghost()
+                .xsmall()
+                .icon(PikuIcon::FitWidth)
+                .tooltip("Fit width")
+                .selected(zoom == ImageZoom::FitWidth)
+                .disabled(!sizeable)
+                .on_click(cx.listener(move |this, _, _, cx| this.preview_fit_width(cx))),
+        )
+        .child(
+            Button::new("pv-zoom-actual")
                 .ghost()
                 .xsmall()
                 .icon(PikuIcon::Scan)
                 .tooltip("Actual size (1:1)")
                 .selected(zoom == ImageZoom::Actual)
                 .disabled(!sizeable)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.view.image_zoom = ImageZoom::Actual;
-                    cx.notify();
-                })),
+                .on_click(cx.listener(move |this, _, _, cx| this.preview_actual_size(cx))),
         )
         .child(
-            Button::new("pv-img-out")
+            Button::new("pv-zoom-out")
                 .ghost()
                 .xsmall()
                 .icon(PikuIcon::ZoomOut)
                 .tooltip("Zoom out")
                 .disabled(!sizeable)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.view.image_zoom = this.view.image_zoom.stepped(0.8, fitted);
-                    cx.notify();
-                })),
+                .on_click(cx.listener(move |this, _, _, cx| this.preview_zoom_by(0.8, cx))),
         )
         .child(
-            Button::new("pv-img-in")
+            Button::new("pv-zoom-in")
                 .ghost()
                 .xsmall()
                 .icon(PikuIcon::ZoomIn)
                 .tooltip("Zoom in")
                 .disabled(!sizeable)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.view.image_zoom = this.view.image_zoom.stepped(1.25, fitted);
-                    cx.notify();
-                })),
+                .on_click(cx.listener(move |this, _, _, cx| this.preview_zoom_by(1.25, cx))),
         )
         .child(
-            // Distinct from Fit: this also discards the pan, so switching back
-            // to 1:1 starts centred rather than wherever you last dragged to.
-            Button::new("pv-img-reset")
+            // Turning the pixels, not transforming the element: gpui's
+            // `with_transformation` exists on `svg` and not on `img`, so the
+            // frame is re-rendered on a worker. That is also why this is
+            // disabled for an SVG — the one image with no buffer to turn.
+            Button::new("pv-zoom-rotate")
+                .ghost()
+                .xsmall()
+                .icon(PikuIcon::RotateCw)
+                .tooltip("Rotate 90° clockwise")
+                .disabled(!sizeable)
+                .on_click(cx.listener(move |this, _, _, cx| this.preview_rotate(cx))),
+        )
+        .child(
+            // Distinct from Fit: this clears the rotation as well, so it is the
+            // one button that puts a turned page back the right way up.
+            Button::new("pv-zoom-reset")
                 .ghost()
                 .xsmall()
                 .icon(PikuIcon::RefreshCw)
                 .tooltip("Reset view")
                 .disabled(!sizeable)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.view.image_zoom = ImageZoom::Fit;
-                    this.pan_scroll.set_offset(gpui::point(px(0.), px(0.)));
-                    cx.notify();
-                })),
+                .on_click(cx.listener(move |this, _, _, cx| this.preview_reset_view(cx))),
         );
 
     if let Some((w, h)) = dimensions {
         // The scale has a number in *both* modes, because fitted resolves
         // against the measured viewport. Before, fitted simply had no readout.
-        let mut label = match zoom.scale(fitted) {
-            Some(scale) => format!("{w} × {h} · {:.0}%", effective_scale(scale, (w, h)) * 100.0),
+        let scale = panel.view.viewport.effective_scale(metrics);
+        let mut label = match scale {
+            Some(scale) => format!("{w} × {h} · {:.0}%", scale * 100.0),
             None => format!("{w} × {h}"),
         };
-        if zoom_is_resolution_limited(zoom.scale(fitted), (w, h)) {
-            // Say so rather than quietly showing a soft image. The preview
-            // buffer is capped at PREVIEW_MAX_EDGE for the cache's sake, so
-            // past this point magnification is stretching decoded pixels, not
-            // revealing source ones.
+        // Say so rather than quietly showing a soft image. The preview buffer is
+        // capped at PREVIEW_MAX_EDGE for the cache's sake, so past this point
+        // magnification is stretching decoded pixels, not revealing source ones.
+        //
+        // Image only. A PDF page has no source pixels to fall short of — pdfium
+        // rasterized it at the size reported here — so the same arithmetic
+        // applied to a tall page would put the marker on a frame that holds
+        // every pixel it claims to.
+        if surface == PreviewSurface::Image && zoom_is_resolution_limited(scale, (w, h)) {
             label.push_str(" · limited");
         }
         row = row.child(
@@ -860,23 +1198,6 @@ fn image_actions(
 
 /// Checkerboard cell size, in pixels.
 const CHECKER_CELL_PX: f32 = 8.0;
-
-/// Largest edge, in layout pixels, that the zoomed image element may ask for.
-///
-/// The zoom *factor* is clamped to 8×, but a factor is not a size: 8× of a
-/// 6000 px photo is a 48 000 px element, which the layout and the renderer both
-/// have to carry. Bounding the result rather than only the multiplier keeps a
-/// large source from turning a legal zoom level into an illegal element.
-const MAX_ZOOMED_EDGE: f32 = 16_384.0;
-
-/// The scale actually used to lay the image out, after the element bound.
-pub(super) fn effective_scale(scale: f32, dimensions: (u32, u32)) -> f32 {
-    let longest = dimensions.0.max(dimensions.1) as f32;
-    if longest <= 0.0 {
-        return scale;
-    }
-    scale.min(MAX_ZOOMED_EDGE / longest)
-}
 
 /// Whether the displayed scale is asking for more source pixels than the
 /// preview buffer actually holds.
@@ -1140,7 +1461,7 @@ fn video_block(
                     .on_click(cx.listener(move |_, _, window, cx| {
                         let name = path_buf
                             .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
+                            .map(|n| n.to_string_lossy().into_owned()) // raw-path-ok: shell_open sanitizes it
                             .unwrap_or_default();
                         crate::ui::explorer::shell_open(&name, &path_buf, window, cx);
                     })),
@@ -1166,68 +1487,142 @@ fn video_block(
 
 // -- PDF --------------------------------------------------------------------
 
-/// Minimum height for a PDF page before the viewport has been measured. Only
-/// ever used for the first frame after the tab opens.
-const PDF_PAGE_MIN_HEIGHT: f32 = 320.0;
-
 fn pdf_block(
     panel: &InspectorPanel,
+    surface: PreviewSurface,
     pages: &[Arc<RenderImage>],
-    total_pages: usize,
     note: Option<&SharedString>,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
     if pages.is_empty() {
+        // Nothing decoded at all: pdfium missing, or the document past the page
+        // cap. The note says which.
         let message = note
             .map(|note| note.to_string())
             .unwrap_or_else(|| "No preview available.".to_string());
         return message_box(message, cx);
     }
 
-    // A page is as tall as the tab, so scrolling moves one page at a time.
-    // Measured, not guessed: the old version subtracted a hard-coded 180 px of
-    // "chrome" from the whole window, which was wrong by exactly the height of
-    // the media bar whenever something was playing.
-    let page_height = f32::from(panel.preview_viewport.get().size.height).max(PDF_PAGE_MIN_HEIGHT);
-
-    let mut column = v_flex().w_full().gap_2().child(
-        div()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(format!(
-                "{total_pages} page{}",
-                if total_pages == 1 { "" } else { "s" }
-            )),
-    );
-    for page in pages {
-        column = column.child(
-            div()
-                .w_full()
-                .h(px(page_height))
-                .rounded(cx.theme().radius)
-                .bg(cx.theme().muted)
-                .overflow_hidden()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    img(ImageSource::Render(page.clone()))
-                        .max_w_full()
-                        .max_h_full()
-                        .object_fit(ObjectFit::Contain),
-                ),
-        );
-    }
+    // One page, filling the tab, with the navigation in the tab bar's suffix.
+    // The previous version stacked every decoded page into a scroll column,
+    // which laid out up to twelve full-height page elements on every frame to
+    // show one of them, and left `total_pages` as the only way to know where
+    // you were.
+    let mut column = v_flex().size_full();
     if let Some(note) = note {
         column = column.child(
             div()
+                .flex_none()
+                .w_full()
+                .px_3()
+                .py_2()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(note.clone()),
         );
     }
-    // Pages stack vertically and this walks them.
-    scroll_fill("pv-pdf-scroll", column.into_any_element(), cx)
+
+    // The *exact* frame, not merely one for this file. The toolbar beside it
+    // reads "7 / 40", and a page number is a claim about what you are looking
+    // at — so a page still rendering waits behind a spinner rather than showing
+    // page 6 under a label that says 7. `image_block` deliberately does the
+    // opposite: a turn has no counter that could be wrong about it.
+    let wanted = FrameSpec::PdfPage {
+        index: panel.view.page,
+        // Normalized here rather than trusted: `==` below compares the raw turn
+        // count, so a 4 that meant 0 would never match a frame holding 0 and the
+        // page would sit behind a spinner for ever.
+        quarter_turns: panel.view.rotation % 4,
+    };
+    // Page one, the right way up, is the frame the initial payload already
+    // carries — so opening a PDF draws immediately and asks for nothing.
+    let unturned = FrameSpec::PdfPage {
+        index: 0,
+        quarter_turns: 0,
+    };
+    let page = match panel.drawn_frame() {
+        Some(frame) if frame.spec == wanted => Some(frame.image.clone()),
+        _ if wanted == unturned => pages.first().cloned(),
+        _ => None,
+    };
+
+    column
+        .child(match page {
+            Some(page) => zoomable_surface(
+                panel,
+                ImageSource::Render(page),
+                Backdrop::Flat,
+                surface.capabilities(),
+                cx,
+            ),
+            // The same spinner on the same fill the whole tab shows while the
+            // first page loads, because this is the same wait.
+            None => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .bg(cx.theme().muted)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(crate::ui::components::piku_spinner(
+                    gpui_component::Size::Small,
+                    cx,
+                ))
+                .into_any_element(),
+        })
+        .into_any_element()
+}
+
+/// Page navigation plus the shared zoom row, for the tab bar's suffix.
+///
+/// This is the control the two-match arrangement lost: the PDF block always had
+/// `pages` and `total_pages`, and `preview_actions` returned `None` for it
+/// regardless, so there was no way to reach page two. [`controls_for`] is what
+/// stops that recurring — a document that reports pages has to return a toolbar,
+/// and `a_surface_that_can_be_acted_on_offers_controls` is the test that says so.
+fn pdf_actions(
+    panel: &InspectorPanel,
+    surface: PreviewSurface,
+    total_pages: usize,
+    cx: &mut Context<InspectorPanel>,
+) -> AnyElement {
+    // `total_pages` is the document's own count, and every page of it is
+    // reachable: the provider rasterizes page one and the rest are fetched on
+    // demand. The label used to read "1 / 12 of 400", because the other 388 were
+    // never rendered and could not be asked for.
+    let last = total_pages.saturating_sub(1);
+    let index = panel.view.page.min(last);
+
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(
+            Button::new("pv-pdf-prev")
+                .ghost()
+                .xsmall()
+                .icon(PikuIcon::ChevronLeft)
+                .tooltip("Previous page")
+                .disabled(index == 0)
+                .on_click(cx.listener(|this, _, _, cx| this.preview_step_page(-1, cx))),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("{} / {total_pages}", index + 1)),
+        )
+        .child(
+            Button::new("pv-pdf-next")
+                .ghost()
+                .xsmall()
+                .icon(PikuIcon::ChevronRight)
+                .tooltip("Next page")
+                .disabled(index >= last)
+                .on_click(cx.listener(|this, _, _, cx| this.preview_step_page(1, cx))),
+        )
+        .child(zoom_controls(panel, surface, cx))
+        .into_any_element()
 }
 
 fn media_block(rows: &[(SharedString, SharedString)], cx: &Context<InspectorPanel>) -> AnyElement {
@@ -1437,5 +1832,207 @@ mod resolution_tests {
     #[test]
     fn an_unmeasured_viewport_makes_no_claim() {
         assert!(!zoom_is_resolution_limited(None, (9000, 9000)));
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use crate::preview::content::PreviewImage;
+    use crate::preview::image_util::render_image_from_bgra_bytes;
+
+    /// One opaque pixel. Enough to stand in for a decoded frame: nothing in the
+    /// control dispatch looks at pixels, only at whether there are any.
+    fn one_pixel() -> Arc<RenderImage> {
+        render_image_from_bgra_bytes(1, 1, vec![0, 0, 0, 255])
+    }
+
+    /// A **non-degenerate** payload for each surface — one carrying everything
+    /// its controls need — with the extension a real file of that kind would
+    /// have. The degenerate cases are asserted separately, because for those
+    /// `controls_for` is allowed to offer nothing.
+    fn sample(surface: PreviewSurface) -> (PreviewContent, &'static str) {
+        match surface {
+            PreviewSurface::Image => (
+                PreviewContent::Image {
+                    source: PreviewImage::Decoded(one_pixel()),
+                    dimensions: Some((40, 20)),
+                },
+                "png",
+            ),
+            PreviewSurface::Code => (
+                PreviewContent::Code {
+                    text: "fn main() {}".into(),
+                    language: Some("rust"),
+                    truncated: false,
+                    total_size: 12,
+                },
+                "rs",
+            ),
+            PreviewSurface::Markdown => (
+                PreviewContent::Markdown {
+                    source: "# hi".into(),
+                    truncated: false,
+                },
+                "md",
+            ),
+            PreviewSurface::Structured => (
+                PreviewContent::Structured {
+                    text: "{}".into(),
+                    language: Some("json"),
+                    pretty: Some("{}".into()),
+                    truncated: false,
+                },
+                "json",
+            ),
+            PreviewSurface::Archive => (
+                PreviewContent::Archive {
+                    entries: Vec::new(),
+                    total_count: 0,
+                    truncated: false,
+                },
+                "zip",
+            ),
+            PreviewSurface::Audio => (
+                PreviewContent::Audio {
+                    rows: Vec::new(),
+                    waveform: Vec::new(),
+                    duration_ms: 1_000,
+                },
+                "mp3",
+            ),
+            PreviewSurface::Video => (
+                PreviewContent::Video {
+                    rows: Vec::new(),
+                    poster: None,
+                },
+                "mp4",
+            ),
+            PreviewSurface::Pdf => (
+                PreviewContent::Pdf {
+                    pages: vec![one_pixel()],
+                    total_pages: 40,
+                    note: None,
+                },
+                "pdf",
+            ),
+            PreviewSurface::Hex => (
+                PreviewContent::Hex {
+                    rows: Vec::new(),
+                    signature: None,
+                    total_size: 8,
+                },
+                "bin",
+            ),
+            PreviewSurface::Diff => (
+                PreviewContent::Diff(crate::services::git::types::DiffPayload {
+                    old_label: "HEAD".to_string(),
+                    new_label: "working tree".to_string(),
+                    hunks: Vec::new(),
+                    truncated: false,
+                    note: None,
+                }),
+                "rs",
+            ),
+            PreviewSurface::Message => (PreviewContent::TooLarge { size: 1 << 40 }, "iso"),
+        }
+    }
+
+    /// The table has to describe the surface it claims to, or every assertion
+    /// below is quietly testing the wrong content.
+    #[test]
+    fn every_surface_names_its_control_group() {
+        for surface in PreviewSurface::ALL {
+            let (content, _) = sample(surface);
+            assert_eq!(
+                PreviewSurface::of(&content),
+                surface,
+                "the sample content for {surface:?} is not that surface"
+            );
+        }
+    }
+
+    /// The claim `pdf_actions`' doc comment made for months with nothing behind
+    /// it: a preview the user can act on has somewhere to act on it. PDF is why
+    /// — it reported `paginated` while its toolbar arm was `_ => None`, so the
+    /// document had forty pages and no way to reach the second.
+    #[test]
+    fn a_surface_that_can_be_acted_on_offers_controls() {
+        for surface in PreviewSurface::ALL {
+            let (content, ext) = sample(surface);
+            let controls = controls_for(&content, ext);
+            assert_eq!(
+                controls != PreviewControls::None,
+                surface.may_have_controls(),
+                "{surface:?} claims {:?} but its controls are {controls:?}",
+                surface.capabilities(),
+            );
+        }
+    }
+
+    /// Zoom without pan is a trap: magnify past the box and everything outside
+    /// it is unreachable. Whatever claims one has to claim the other.
+    #[test]
+    fn anything_zoomable_is_also_pannable() {
+        for surface in PreviewSurface::ALL {
+            let capabilities = surface.capabilities();
+            assert!(
+                !capabilities.zoomable || capabilities.pannable,
+                "{surface:?} can be zoomed but not panned"
+            );
+        }
+    }
+
+    /// Pagination counts the *document*, not what the loader decoded. One page
+    /// is rasterized up front and the rest are fetched on demand, so a 40-page
+    /// file must offer all 40 — the cap that stopped at twelve is gone.
+    #[test]
+    fn pagination_counts_the_document_rather_than_what_was_decoded() {
+        let (content, ext) = sample(PreviewSurface::Pdf);
+        assert_eq!(
+            controls_for(&content, ext),
+            PreviewControls::Pdf { total_pages: 40 }
+        );
+    }
+
+    /// The other direction of `may_have_controls`: it is an upper bound, so a
+    /// degenerate document is entitled to offer nothing.
+    #[test]
+    fn a_degenerate_document_offers_nothing() {
+        // No decodable page: pdfium missing, or past the page cap. That is a
+        // message box, and a message has no pages to turn.
+        let empty = PreviewContent::Pdf {
+            pages: Vec::new(),
+            total_pages: 0,
+            note: Some("Preview unavailable.".into()),
+        };
+        assert_eq!(controls_for(&empty, "pdf"), PreviewControls::None);
+
+        // Truncated YAML: no tree, because the parse would be of half a
+        // document, and no pretty form, which is JSON only. Both toggles would
+        // toggle nothing.
+        let truncated = PreviewContent::Structured {
+            text: "a: 1".into(),
+            language: Some("yaml"),
+            pretty: None,
+            truncated: true,
+        };
+        assert_eq!(controls_for(&truncated, "yaml"), PreviewControls::None);
+
+        // The same bytes whole do get a tree, so the case above is about the
+        // truncation and not about YAML.
+        let whole = PreviewContent::Structured {
+            text: "a: 1".into(),
+            language: Some("yaml"),
+            pretty: None,
+            truncated: false,
+        };
+        assert_eq!(
+            controls_for(&whole, "yaml"),
+            PreviewControls::Structured {
+                tree_capable: true,
+                has_pretty: false,
+            }
+        );
     }
 }

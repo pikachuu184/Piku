@@ -19,6 +19,7 @@ use gpui_component::{
 use crate::app::actions::{RemoveRecentPath, ToggleFavoritePath, TogglePinnedPath};
 use crate::app::assets::PikuIcon;
 use crate::backend::dispatch::BackendExt as _;
+use crate::security::text::{sanitize_label, sanitize_path};
 use crate::services::fs_service::{DriveInfo, Place};
 use crate::state::PikuState;
 use crate::ui::components::skeleton_rows;
@@ -272,7 +273,7 @@ impl NavPanel {
     ) -> impl IntoElement {
         let click_path = path.clone();
         let menu_path = path.clone();
-        let tooltip_text = path.display().to_string();
+        let tooltip_text = sanitize_path(&path);
         h_flex()
             .id(id)
             .items_center()
@@ -357,8 +358,8 @@ impl NavPanel {
             .map(|(ix, path)| {
                 let label: SharedString = path
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string())
+                    .map(|n| sanitize_label(&n.to_string_lossy()))
+                    .unwrap_or_else(|| sanitize_path(path))
                     .into();
                 gpui::IntoElement::into_any_element(self.nav_row(
                     SharedString::from(format!("{prefix}-{ix}")),

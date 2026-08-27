@@ -376,7 +376,7 @@ impl VideoView {
                                         let toast = match result {
                                             Ok(dest) => crate::ui::toast::info(format!(
                                                 "Saved {}",
-                                                dest.display()
+                                                crate::security::text::sanitize_path(&dest)
                                             )),
                                             Err(error) => crate::ui::toast::error(
                                                 BackendError::from(error).user_message(),

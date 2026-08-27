@@ -16,6 +16,7 @@ use gpui_component::{
 
 use crate::app::actions::{SortByModified, SortByName, SortBySize, SortByType};
 use crate::app::assets::PikuIcon;
+use crate::security::text::sanitize_label;
 use crate::state::pane_state::{SortBy, ViewMode};
 use crate::ui::components::piku_spinner;
 use crate::ui::explorer::ExplorerPanel;
@@ -30,6 +31,10 @@ impl ExplorerPanel {
         let ascending = self.session.ascending;
 
         // Breadcrumb segments: drive prefix plus each directory component.
+        //
+        // Every segment is sanitized. This row draws each ancestor of wherever
+        // the user has browsed to, so one hostile directory name upstream would
+        // otherwise reorder the whole trail for everything beneath it.
         let mut segments: Vec<(String, PathBuf)> = Vec::new();
         let mut acc = PathBuf::new();
         for component in self.session.cwd.components() {
@@ -39,7 +44,7 @@ impl ExplorerPanel {
                     acc.push(component.as_os_str());
                     acc.push("\\");
                     segments.push((
-                        prefix.as_os_str().to_string_lossy().into_owned(),
+                        sanitize_label(&prefix.as_os_str().to_string_lossy()),
                         acc.clone(),
                     ));
                 }
@@ -47,7 +52,7 @@ impl ExplorerPanel {
                 _ => {
                     acc.push(component.as_os_str());
                     segments.push((
-                        component.as_os_str().to_string_lossy().into_owned(),
+                        sanitize_label(&component.as_os_str().to_string_lossy()),
                         acc.clone(),
                     ));
                 }
