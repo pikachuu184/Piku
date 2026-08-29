@@ -11,7 +11,7 @@ use anyhow::{Context as _, bail};
 use crate::core::entry::FsEntry;
 use crate::security::audit;
 use crate::security::path_guard::PathGuard;
-use crate::storage::provider::{ProgressFn, StorageProvider};
+use crate::storage::provider::{PauseGate, ProgressFn, StorageProvider};
 
 const COPY_CHUNK: usize = 1024 * 1024;
 
@@ -165,6 +165,7 @@ impl StorageProvider for LocalProvider {
         to: &Path,
         progress: ProgressFn,
         cancel: &AtomicBool,
+        pause: Option<&PauseGate>,
     ) -> anyhow::Result<u64> {
         let from = self.guard.sanitize(from)?;
         let to = self.guard.sanitize(to)?;
@@ -199,7 +200,16 @@ impl StorageProvider for LocalProvider {
         let mut buffer = vec![0u8; COPY_CHUNK];
         let mut copied: u64 = 0;
         loop {
-            if cancel.load(Ordering::Relaxed) {
+            // Pause first, cancel second. A user who pauses and then cancels
+            // gets the cancel: `wait_while_paused` returns false the moment the
+            // flag is set, and falls through to the branch below that removes
+            // the partial file. A *paused* copy's partial file is deliberately
+            // left alone — that is the whole difference between the two.
+            let running = match pause {
+                Some(gate) => gate.wait_while_paused(cancel),
+                None => !cancel.load(Ordering::Relaxed),
+            };
+            if !running {
                 drop(dst);
                 let _ = fs::remove_file(&to);
                 audit::record("copy_file", &from, Some(&to), false, "cancelled");

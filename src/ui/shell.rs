@@ -20,7 +20,7 @@ use crate::app::actions::{
     PinTab, PreviewActualSize, PreviewFit, PreviewFitWidth, PreviewNextPage, PreviewPrevPage,
     PreviewResetView, PreviewRotate, PreviewZoomIn, PreviewZoomOut, RemoveRecentPath,
     RenameWorkspace, RevealPreview, ShowAbout, SplitDown, SplitRight, SwitchWorkspace,
-    ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath, ToggleRightDock,
+    ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath, ToggleRightDock, ToggleTransferCenter,
 };
 use crate::state::PikuState;
 use crate::state::nav_model::NavModel;
@@ -47,6 +47,15 @@ pub struct Workspace {
     /// Branch panel anchored above the status bar (toggled from its git
     /// segment); dropped entirely when closed.
     branch_popover: Option<Entity<crate::ui::git::BranchPopover>>,
+    /// Transfer panel anchored above the status bar's transfer segment, which
+    /// is on the right. Same lifecycle as `branch_popover`: dropped when
+    /// closed, so a panel that is not on screen is not observing the store.
+    transfer_popover: Option<Entity<crate::ui::transfers::popover::TransferPopover>>,
+    /// Whether we believe a transfer center dialog is on the dialog stack, so
+    /// `ToggleTransferCenter` closes it instead of stacking a second identical
+    /// one. Cleared by the dialog's own `on_close`, which fires for all three
+    /// ways out (close button, Escape, clicking the overlay).
+    transfer_center: bool,
     _save_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -102,6 +111,8 @@ impl Workspace {
             media_bar,
             last_layout: None,
             branch_popover: None,
+            transfer_popover: None,
+            transfer_center: false,
             _save_task: None,
             _subscriptions: subscriptions,
         };
@@ -315,6 +326,58 @@ impl Workspace {
             self.branch_popover =
                 Some(cx.new(|cx| crate::ui::git::BranchPopover::new(root, window, cx)));
         }
+        cx.notify();
+    }
+
+    /// Toggle the compact transfer panel above the status bar's transfer
+    /// segment (invoked from that segment).
+    ///
+    /// No `Window`, unlike its git counterpart: the panel holds no input, so
+    /// there is nothing to focus when it appears.
+    pub fn toggle_transfer_popover(&mut self, cx: &mut Context<Self>) {
+        self.transfer_popover = match self.transfer_popover.take() {
+            Some(_) => None,
+            None => Some(cx.new(crate::ui::transfers::popover::TransferPopover::new)),
+        };
+        cx.notify();
+    }
+
+    /// Open the transfer center, or close the one already open.
+    ///
+    /// The only path into the center. The popover's `Details` dispatches this
+    /// action rather than opening the dialog itself, so `transfer_center` cannot
+    /// disagree with what is on screen — and a second `ctrl-shift-t` closes the
+    /// center instead of stacking an identical one on top of it.
+    ///
+    /// The closing half asks the dialog layer for its *topmost* dialog, which is
+    /// all it offers — it does not say which one that is. So with a conflict
+    /// surface or an error alert stacked over the center, this dismisses that
+    /// instead. Nothing is lost when it happens: dismissing a conflict surface
+    /// sends no decision and leaves the job waiting, which is the same as
+    /// pressing Escape.
+    fn on_toggle_transfer_center(
+        &mut self,
+        _: &ToggleTransferCenter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transfer_center {
+            self.transfer_center = false;
+            window.close_dialog(cx);
+            return;
+        }
+        // The center supersedes the popover. Left open, it would sit behind the
+        // dialog's overlay as a panel the user can see and cannot click.
+        self.transfer_popover = None;
+        self.transfer_center = true;
+        let this = cx.entity();
+        crate::ui::transfers::center::open(
+            move |_, cx| {
+                this.update(cx, |this, _| this.transfer_center = false);
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -577,6 +640,7 @@ impl Render for Workspace {
                 this.open_media_panel(action.0.clone(), window, cx);
             }))
             .on_action(cx.listener(Self::on_show_about))
+            .on_action(cx.listener(Self::on_toggle_transfer_center))
             .on_action(cx.listener(|this, action: &SwitchWorkspace, window, cx| {
                 let id = action.0.clone();
                 this.switch_workspace(&id, window, cx);
@@ -628,6 +692,24 @@ impl Render for Workspace {
                         .occlude()
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.branch_popover = None;
+                            cx.notify();
+                        }))
+                        .child(popover),
+                )
+            })
+            // Transfer panel floating just above the status bar's transfer
+            // segment — the same overlay block, anchored right because that
+            // segment sits on the right.
+            .when_some(self.transfer_popover.clone(), |root, popover| {
+                root.child(
+                    div()
+                        .id("transfer-popover-overlay")
+                        .absolute()
+                        .bottom(px(34.))
+                        .right(px(8.))
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.transfer_popover = None;
                             cx.notify();
                         }))
                         .child(popover),

@@ -65,6 +65,7 @@ actions!(
         CutSelection,
         PasteClipboard,
         DeleteSelection,
+        DeletePermanentSelection,
         RenameSelection,
         NewFolder,
         NewFile,
@@ -97,6 +98,7 @@ actions!(
         DuplicateWorkspace,
         DeleteWorkspace,
         ShowAbout,
+        ToggleTransferCenter,
     ]
 );
 
@@ -111,6 +113,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-\\", SplitDown, None),
         KeyBinding::new("ctrl-b", ToggleLeftDock, None),
         KeyBinding::new("ctrl-alt-b", ToggleRightDock, None),
+        // Transfers are app-wide infrastructure, not a pane's business: a copy
+        // outlives the tab that started it, so this must work from anywhere,
+        // including from inside the inspector or the filter box. Hence context
+        // `None`, like the dock toggles above.
+        KeyBinding::new("ctrl-shift-t", ToggleTransferCenter, None),
         KeyBinding::new("alt-left", NavigateBack, explorer),
         KeyBinding::new("alt-right", NavigateForward, explorer),
         KeyBinding::new("alt-up", NavigateUp, explorer),
@@ -121,6 +128,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-x", CutSelection, explorer),
         KeyBinding::new("ctrl-v", PasteClipboard, explorer),
         KeyBinding::new("delete", DeleteSelection, explorer),
+        // The conventional shortcut for the irreversible one, and deliberately
+        // one key away from the reversible one — which is why it always
+        // confirms, whatever `confirm_delete` is set to.
+        KeyBinding::new("shift-delete", DeletePermanentSelection, explorer),
         KeyBinding::new("f2", RenameSelection, explorer),
         KeyBinding::new("ctrl-shift-n", NewFolder, explorer),
         KeyBinding::new("ctrl-n", NewFile, explorer),

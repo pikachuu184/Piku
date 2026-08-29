@@ -29,6 +29,7 @@ use crate::storage::provider::StorageProvider as _;
 
 use crate::app::actions::{self as actions};
 use crate::app::assets::PikuIcon;
+use crate::backend::services::transfer::conflict::ConflictPolicy;
 use crate::core::entry::FsEntry;
 use crate::security::file_name::validate_name;
 use crate::security::text::{sanitize_label, sanitize_path};
@@ -834,7 +835,11 @@ impl ExplorerPanel {
         }
         let dest = self.session.cwd.clone();
         jobs.update(cx, |jobs, cx| {
-            jobs.submit_copy(paths, dest, cut, window, cx);
+            // `Ask`: a paste over an existing tree stops and shows the
+            // collisions once, rather than silently writing `name (2)` beside
+            // every one of them. The user's answer becomes the job's policy from
+            // there on.
+            jobs.submit_copy(paths, dest, cut, ConflictPolicy::Ask, window, cx);
         });
         if cut {
             clipboard.update(cx, |clipboard, _| {
@@ -844,6 +849,7 @@ impl ExplorerPanel {
         }
     }
 
+    /// `delete` — to the Recycle Bin, and skippable via `confirm_delete`.
     fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let entries = self.selected_entries();
         if entries.is_empty() {
@@ -858,6 +864,19 @@ impl ExplorerPanel {
                 jobs.submit_delete(paths, window, cx);
             });
         }
+    }
+
+    /// `shift-delete` — no trash, no undo, and always a dialog.
+    ///
+    /// `settings.confirm_delete` is not consulted: it is the user's answer about
+    /// the reversible flow above, and there is no unattended path to permanent
+    /// destruction. See [`super::dialogs::confirm_delete_permanent`].
+    fn delete_permanent_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.selected_entries();
+        if entries.is_empty() {
+            return;
+        }
+        super::dialogs::confirm_delete_permanent(entries, window, cx);
     }
 
     fn toggle_view(&mut self, cx: &mut Context<Self>) {
@@ -1198,7 +1217,8 @@ impl ExplorerPanel {
     }
 
     /// Receive a set of dropped paths into `dest` (move or copy). Every path is
-    /// re-sanitized inside the job queue, which also records the audit entry.
+    /// authorized again inside the transfer engine, which also records the audit
+    /// entry.
     pub(super) fn drop_into(
         &mut self,
         paths: Vec<PathBuf>,
@@ -1218,7 +1238,7 @@ impl ExplorerPanel {
             return;
         }
         PikuState::global(cx).jobs.clone().update(cx, |jobs, cx| {
-            jobs.submit_copy(paths, dest, is_move, window, cx);
+            jobs.submit_copy(paths, dest, is_move, ConflictPolicy::Ask, window, cx);
         });
     }
 
@@ -1321,6 +1341,11 @@ impl Render for ExplorerPanel {
             .on_action(
                 cx.listener(|this, _: &actions::DeleteSelection, window, cx| {
                     this.delete_selection(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::DeletePermanentSelection, window, cx| {
+                    this.delete_permanent_selection(window, cx)
                 }),
             )
             .on_action(

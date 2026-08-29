@@ -8,6 +8,7 @@ pub mod sidebar;
 pub mod statusbar;
 pub mod titlebar;
 pub mod toast;
+pub mod transfers;
 
 use std::path::PathBuf;
 
