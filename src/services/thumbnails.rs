@@ -32,6 +32,7 @@ use crate::backend::services::preview::{ThumbKey, ThumbRequest, ThumbSource};
 use crate::core::entry::FsEntry;
 use crate::core::file_type::{FileCategory, categorize};
 use crate::preview::image_util::render_image_from_bgra;
+use crate::services::atlas_reaper;
 
 pub use crate::backend::services::preview::THUMB_TARGET;
 
@@ -100,10 +101,10 @@ impl ThumbnailCache {
     /// keep a stale thumbnail — and, more subtly, should not keep a stale
     /// *failure*.
     ///
-    /// Returns the discarded images so the caller can free their atlas tiles;
+    /// Returns the discarded images so the caller can release their atlas tiles;
     /// see [`ThumbnailCache::evict`].
     #[allow(dead_code, reason = "wired to the watch service in Stage 6")]
-    #[must_use = "the returned images still own GPU memory; pass them to App::drop_image"]
+    #[must_use = "the returned images still own GPU memory; pass them to services::atlas_reaper::release_later"]
     pub fn evict_path(&mut self, path: &std::path::Path) -> Vec<Arc<RenderImage>> {
         let mut dropped = Vec::new();
         self.ready.retain(|k, image| {
@@ -174,7 +175,7 @@ impl ThumbnailCache {
                                     // orphans the old image's atlas tile as surely
                                     // as eviction does.
                                     if let Some(old) = replaced {
-                                        cx.drop_image(old, None);
+                                        atlas_reaper::release_later(old, cx);
                                     }
                                     this.touch(&thumb.key);
                                 }
@@ -183,12 +184,11 @@ impl ThumbnailCache {
                                 }
                             }
                         }
-                        // Free the atlas tiles of everything eviction discarded.
-                        // This callback runs from the foreground executor, not
-                        // inside a window update, so every window that painted
-                        // these is reachable through `App` and `None` is right.
+                        // Hand the atlas tiles of everything eviction discarded
+                        // to the reaper, which frees them once no row can still
+                        // paint them.
                         for image in this.evict() {
-                            cx.drop_image(image, None);
+                            atlas_reaper::release_later(image, cx);
                         }
                     }
                     StreamItem::Progress(_) => {}
@@ -214,11 +214,11 @@ impl ThumbnailCache {
     /// [`CACHE_CAP`], returning the images that left.
     ///
     /// The return value is load-bearing, not a convenience. A painted
-    /// `RenderImage` owns a sprite-atlas tile that only `App::drop_image` frees,
-    /// so an entry dropped here without that call leaks GPU memory for the life
-    /// of the process. Returning rather than taking a `&mut App` keeps the cache
-    /// testable without a gpui harness.
-    #[must_use = "the returned images still own GPU memory; pass them to App::drop_image"]
+    /// `RenderImage` owns a sprite-atlas tile that only the reaper frees, so an
+    /// entry dropped here without being handed over leaks GPU memory for the
+    /// life of the process. Returning rather than taking a `&mut App` keeps the
+    /// cache testable without a gpui harness.
+    #[must_use = "the returned images still own GPU memory; pass them to services::atlas_reaper::release_later"]
     fn evict(&mut self) -> Vec<Arc<RenderImage>> {
         let mut dropped = Vec::new();
         while self.ready.len() > CACHE_CAP {

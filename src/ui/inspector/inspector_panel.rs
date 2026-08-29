@@ -38,6 +38,7 @@ use crate::core::file_type::categorize;
 use crate::core::format::{format_size, format_time};
 use crate::preview::content::PreviewContent;
 use crate::security::text::sanitize_path;
+use crate::services::atlas_reaper;
 use crate::services::preview_cache::PreviewKey;
 use crate::state::PikuState;
 use crate::ui::components::{category_icon, empty_state};
@@ -188,8 +189,9 @@ pub(super) struct DerivedFrame {
     pub path: PathBuf,
     pub spec: FrameSpec,
     pub dimensions: (u32, u32),
-    /// Owns a sprite-atlas tile that only `App::drop_image` frees — which is
-    /// why every path out of this slot goes through
+    /// Owns a sprite-atlas tile that only
+    /// [`atlas_reaper`](crate::services::atlas_reaper) frees — which is why every
+    /// path out of this slot goes through
     /// [`InspectorPanel::release_derived`] or the explicit release in
     /// [`InspectorPanel::request_frame`].
     pub image: Arc<RenderImage>,
@@ -237,7 +239,7 @@ impl InspectorPanel {
         // it would otherwise cover is invisible.
         let release = cx.on_release(|this: &mut Self, cx| {
             if let Some(frame) = this.derived.take() {
-                cx.drop_image(frame.image, None);
+                atlas_reaper::release_later(frame.image, cx);
             }
         });
 
@@ -333,7 +335,7 @@ impl InspectorPanel {
                         let content = Arc::new(PreviewContent::from(ready.payload));
                         let cache = PikuState::global(cx).preview_cache.clone();
                         // Not a bare `insert`: whatever this displaces still owns
-                        // a sprite-atlas tile, and only `drop_image` frees it.
+                        // a sprite-atlas tile, and only the reaper frees it.
                         crate::services::preview_cache::cache_preview(
                             &cache,
                             ready.key,
@@ -1027,11 +1029,11 @@ impl InspectorPanel {
 
                 // The selection can move on between the worker finishing and
                 // this landing, in which case the frame arrives for a file that
-                // is no longer open: nothing would ever draw it and nothing
-                // would ever free it.
+                // is no longer open: nothing would ever draw it. Discard the
+                // buffer without interning it — an uninterned image owns no
+                // atlas tile, so there is nothing to release.
                 if this.loaded.as_ref().map(|l| l.path.as_path()) != Some(for_frame.as_path()) {
-                    let image = crate::preview::image_util::render_image_from_bgra(raw);
-                    cx.drop_image(image, None);
+                    drop(raw);
                     return;
                 }
 
@@ -1044,7 +1046,10 @@ impl InspectorPanel {
                     image,
                 }) {
                     // Every replacement releases. Nothing else frees the tile.
-                    cx.drop_image(stale.image, None);
+                    // Via the reaper, because `cx.notify()` below marks *this*
+                    // panel dirty and nothing else: any other view still holding
+                    // the frame keeps replaying its cached subtree.
+                    atlas_reaper::release_later(stale.image, cx);
                 }
                 cx.notify();
             },
@@ -1053,17 +1058,18 @@ impl InspectorPanel {
 
     /// Drop the held frame and stop any request for one.
     ///
-    /// The image is handed to `drop_image` rather than merely dropped: an
-    /// `Arc<RenderImage>` owns a sprite-atlas tile and nothing else frees it.
-    /// `None` for the window because this runs from the foreground executor as
-    /// well as from window updates, and every window that could have painted the
-    /// frame is reachable from `App` — the same reasoning as `cache_preview` in
-    /// `services/preview_cache.rs`.
+    /// The image goes to [`atlas_reaper`](crate::services::atlas_reaper) rather
+    /// than merely being dropped: an `Arc<RenderImage>` owns a sprite-atlas tile
+    /// and nothing else frees it. It also cannot be freed here, and used not to
+    /// be freed at all — most callers reach this from a click handler, i.e. from
+    /// inside a window update, and `App::drop_image(.., None)` skips the window
+    /// being updated because `update_window_id` takes it out of the map. The
+    /// reaper releases per window, on a later frame, which fixes both halves.
     fn release_derived(&mut self, cx: &mut App) {
         self.derived_req = None;
         self.derived_pending = None;
         if let Some(frame) = self.derived.take() {
-            cx.drop_image(frame.image, None);
+            atlas_reaper::release_later(frame.image, cx);
         }
     }
 

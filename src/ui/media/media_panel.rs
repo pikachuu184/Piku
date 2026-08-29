@@ -99,7 +99,7 @@ impl MediaPanel {
                         let content = Arc::new(PreviewContent::from(ready.payload));
                         let cache = PikuState::global(cx).preview_cache.clone();
                         // Not a bare `insert`: whatever this displaces still owns
-                        // a sprite-atlas tile, and only `drop_image` frees it.
+                        // a sprite-atlas tile, and only the reaper frees it.
                         crate::services::preview_cache::cache_preview(
                             &cache,
                             ready.key,
