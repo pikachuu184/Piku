@@ -11,9 +11,10 @@
 //!    [`BackendError::is_cancelled`] replaces that with something the compiler
 //!    checks.
 
-// PreviewError and the variants it composes are raised as of Stage 7. The rest
-// — DirectoryError, MetadataError, and the mutating arms of FileError and
-// PathError — belong to services that have not landed.
+// PreviewError and the variants it composes are raised as of Stage 7, and
+// TransferError as of the transfer engine. The rest — DirectoryError,
+// MetadataError, and the mutating arms of FileError and PathError — belong to
+// services that have not landed.
 //
 // `expect` rather than `allow`: once every variant is raised, this attribute
 // itself starts erroring, which is the reminder to delete it.
@@ -149,6 +150,89 @@ impl PreviewError {
     }
 }
 
+/// Which way a transfer moves data.
+///
+/// Named rather than a bare `bool` so a call site reads `TransferVerb::Move`
+/// instead of `true`, and so the two words that reach the user ("copied",
+/// "moved") come from one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferVerb {
+    Copy,
+    Move,
+}
+
+impl TransferVerb {
+    pub fn is_move(self) -> bool {
+        matches!(self, Self::Move)
+    }
+
+    /// Past participle, for "cannot be *copied* into itself".
+    pub fn participle(self) -> &'static str {
+        match self {
+            Self::Copy => "copied",
+            Self::Move => "moved",
+        }
+    }
+}
+
+impl std::fmt::Display for TransferVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.participle())
+    }
+}
+
+/// Copy, move, and permanent-delete failures.
+///
+/// Composes [`PathError`] and [`FileError`] rather than restating them: every
+/// node a transfer touches goes through the same authorization and the same
+/// per-file reader as any other operation, so a second copy of those strings
+/// is how they drift apart.
+///
+/// These messages are the *technical* form — they go to logs and to
+/// [`BackendError::user_message`] as a last resort. The polished sentence the
+/// user reads comes from `services::jobs::label::transfer_error`, which is
+/// where every transfer string lives and is golden-tested.
+#[derive(Debug, thiserror::Error)]
+pub enum TransferError {
+    #[error(transparent)]
+    Path(#[from] PathError),
+    #[error(transparent)]
+    File(#[from] FileError),
+    /// Copy or move of a directory into its own subtree.
+    #[error("`{path}` cannot be {verb} into itself")]
+    IntoItself { verb: TransferVerb, path: Arc<str> },
+    /// A move whose destination already holds the source.
+    #[error("`{0}` is already in the destination folder")]
+    NoOpMove(Arc<str>),
+    /// The destination volume cannot hold the planned bytes.
+    #[error("the destination needs {needed} more bytes than it has")]
+    InsufficientSpace { needed: u64, available: u64 },
+    #[error("`{0}` cannot be written to")]
+    NotWritable(Arc<str>),
+    /// A move whose copy half succeeded but whose source removal did not. The
+    /// data is safe; the user has two copies.
+    #[error("copied `{path}`, but could not remove the source: {detail}")]
+    SourceCleanup { path: Arc<str>, detail: Arc<str> },
+    /// The transfer stopped for a decision and the channel closed without one —
+    /// the window went away, or the app is quitting.
+    #[error("no decision was made")]
+    Abandoned,
+    #[error("cancelled")]
+    Cancelled,
+}
+
+impl From<crate::backend::protocol::Cancelled> for TransferError {
+    fn from(_: crate::backend::protocol::Cancelled) -> Self {
+        Self::Cancelled
+    }
+}
+
+impl TransferError {
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled | Self::File(FileError::Cancelled))
+    }
+}
+
 /// Drive and mount discovery failures.
 #[derive(Debug, thiserror::Error)]
 pub enum DriveError {
@@ -177,6 +261,8 @@ pub enum BackendError {
     Drive(#[from] DriveError),
     #[error(transparent)]
     Preview(#[from] PreviewError),
+    #[error(transparent)]
+    Transfer(#[from] TransferError),
     #[error("the backend is shutting down")]
     ShuttingDown,
 }
@@ -193,7 +279,9 @@ impl BackendError {
             | Self::Preview(PreviewError::Cancelled)
             // A preview whose *read* was cancelled is still a cancellation;
             // without this arm a superseded selection would raise a toast.
-            | Self::Preview(PreviewError::File(FileError::Cancelled)) => true,
+            | Self::Preview(PreviewError::File(FileError::Cancelled))
+            | Self::Transfer(TransferError::Cancelled)
+            | Self::Transfer(TransferError::File(FileError::Cancelled)) => true,
             // A shutdown drain is not a user-visible failure either; treating
             // it as cancellation keeps quit from raising an error toast.
             Self::ShuttingDown => true,
@@ -296,11 +384,78 @@ mod tests {
                 .is_cancelled(),
             "a parser refusal is a real failure"
         );
+        assert!(BackendError::from(TransferError::Cancelled).is_cancelled());
+        // A cancelled copy cancels inside `copy_file`, one layer down.
+        assert!(BackendError::from(TransferError::File(FileError::Cancelled)).is_cancelled());
+        assert!(
+            !BackendError::from(TransferError::NoOpMove("a.txt".into())).is_cancelled(),
+            "a refused move is a real failure"
+        );
         assert!(!BackendError::from(PathError::Traversal).is_cancelled());
         assert!(
             !BackendError::from(FileError::AlreadyExists("a.txt".into())).is_cancelled(),
             "a real failure must not be mistaken for cancellation"
         );
+    }
+
+    /// `TransferError`'s own messages are the technical form. They still reach
+    /// the user when nothing more specific is available, so they are pinned.
+    #[test]
+    fn transfer_error_messages_are_pinned() {
+        let cases: Vec<(TransferError, &str)> = vec![
+            (
+                TransferError::IntoItself {
+                    verb: TransferVerb::Copy,
+                    path: "photos".into(),
+                },
+                "`photos` cannot be copied into itself",
+            ),
+            (
+                TransferError::IntoItself {
+                    verb: TransferVerb::Move,
+                    path: "photos".into(),
+                },
+                "`photos` cannot be moved into itself",
+            ),
+            (
+                TransferError::NoOpMove("report.pdf".into()),
+                "`report.pdf` is already in the destination folder",
+            ),
+            (
+                TransferError::InsufficientSpace {
+                    needed: 4096,
+                    available: 10,
+                },
+                "the destination needs 4096 more bytes than it has",
+            ),
+            (
+                TransferError::NotWritable("/mnt/ro".into()),
+                "`/mnt/ro` cannot be written to",
+            ),
+            (
+                TransferError::SourceCleanup {
+                    path: "photos".into(),
+                    detail: "permission denied".into(),
+                },
+                "copied `photos`, but could not remove the source: permission denied",
+            ),
+            (TransferError::Abandoned, "no decision was made"),
+            (TransferError::Cancelled, "cancelled"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected, "message drifted");
+            // And the wrapper is transparent, so a toast reads the same either
+            // way.
+            assert_eq!(BackendError::from(error).to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn transfer_verbs_name_themselves() {
+        assert!(TransferVerb::Move.is_move());
+        assert!(!TransferVerb::Copy.is_move());
+        assert_eq!(TransferVerb::Copy.to_string(), "copied");
+        assert_eq!(TransferVerb::Move.to_string(), "moved");
     }
 
     #[test]

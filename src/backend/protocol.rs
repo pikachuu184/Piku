@@ -11,10 +11,15 @@
 //! the current UI collapse into holding (or not holding) an [`Inflight`].
 
 // Stage 7 consumed most of this: BackendTask, BackendStream, Inflight, Cancel,
-// StreamItem, both sinks and both channel constructors are live. What remains
-// is waiting on specific work — `Progress` and `StreamItem::Progress` for the
-// transfer engine, `send`/`finish_async` for a producer that is async rather
-// than blocking.
+// StreamItem, both sinks and both channel constructors are live. The transfer
+// engine then took `Progress` (inside its own per-job sample) and `try_send`.
+//
+// What remains is `StreamItem::Progress` and `send`/`finish_async`. The former
+// is stranded for a structural reason worth recording: it carries no job
+// identity, so a stream that multiplexes several jobs cannot say *which* one
+// moved. The transfer scheduler therefore publishes progress inside its
+// `Batch`, one entry per job. A single-job stream is still the variant's case,
+// and `CalculateFolderSize` is the next one.
 //
 // `expect` rather than `allow`: once the last item is constructed, this
 // attribute itself starts erroring, which is the reminder to delete it.
@@ -344,6 +349,25 @@ impl<T, S> StreamSink<T, S> {
             return false;
         }
         self.tx.send(item).await.is_ok()
+    }
+
+    /// Send without waiting, dropping the item if the consumer is behind.
+    ///
+    /// For **periodic** publications, where a lost item costs nothing because
+    /// the next one supersedes it. The transfer scheduler's 200 ms tick is the
+    /// case: `send` there would let a stalled renderer throttle the disk, and
+    /// `send_blocking` would hold one of the 24 blocking threads waiting on a
+    /// frame. Neither is a trade a copy should make.
+    ///
+    /// Returns whether the item was accepted. A `false` means either "stop
+    /// working" (cancelled or dropped) or "try again next period", and the two
+    /// are deliberately not distinguished: a periodic producer's response to
+    /// both is to do nothing and come back.
+    pub fn try_send(&self, item: StreamItem<T, S>) -> bool {
+        if self.is_cancelled() {
+            return false;
+        }
+        self.tx.try_send(item).is_ok()
     }
 
     /// Deliver the terminal item from a **blocking** context. Consumes the

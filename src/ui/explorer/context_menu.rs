@@ -5,8 +5,8 @@ use gpui::{Context, Window};
 use gpui_component::{Icon, IconName, menu::PopupMenu};
 
 use crate::app::actions::{
-    CopySelection, CutSelection, DeleteSelection, FavoriteSelection, NewFile, NewFolder,
-    OpenSelection, PasteClipboard, PinSelection, RefreshPane, RenameSelection,
+    CopySelection, CutSelection, DeletePermanentSelection, DeleteSelection, FavoriteSelection,
+    NewFile, NewFolder, OpenSelection, PasteClipboard, PinSelection, RefreshPane, RenameSelection,
 };
 use crate::app::assets::PikuIcon;
 
@@ -51,6 +51,15 @@ pub(super) fn build(
                 "Move to Recycle Bin",
                 Icon::new(PikuIcon::Trash),
                 Box::new(DeleteSelection),
+            )
+            // Adjacent to the reversible one and named for what it does, so the
+            // difference is read rather than discovered. The menu renders each
+            // item's binding, which is the other half of the distinction:
+            // `Delete` above, `Shift+Delete` here.
+            .menu_with_icon(
+                "Delete permanently",
+                Icon::new(IconName::Delete),
+                Box::new(DeletePermanentSelection),
             )
             .separator()
             .menu_with_icon(

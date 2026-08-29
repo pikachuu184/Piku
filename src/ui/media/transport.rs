@@ -29,6 +29,7 @@ use gpui_component::{
 use crate::app::assets::PikuIcon;
 use crate::services::audio_player::{AudioPlayer, TrackMeta};
 use crate::state::PikuState;
+use crate::ui::components::paint_bars;
 
 /// Mutate the global player from within a view listener. Cloning the entity
 /// handle first releases the immutable borrow that `global(cx)` holds, so the
@@ -382,26 +383,24 @@ pub fn scrubber<V: 'static>(
                             played,
                         ));
                     } else {
+                        // Same arithmetic as the transfer waveform, and the same
+                        // code — see `ui::components::bars`. The played/unplayed
+                        // split is this caller's alone: the bar's centre decides,
+                        // so a bar the playhead is halfway through belongs to
+                        // whichever side holds most of it.
                         let n = peaks.len();
-                        let slot = (w / n as f32).max(1.0);
-                        let bar_w = (slot - 2.0).max(1.0);
-                        for (i, peak) in peaks.iter().enumerate() {
-                            let bar_h = (peak * (h - 8.0)).max(2.0);
-                            let x = ox + i as f32 * slot + 1.0;
-                            let y = oy + (h - bar_h) / 2.0;
-                            let color = if (i as f32 + 0.5) / n as f32 <= progress {
-                                played
-                            } else {
-                                rest
-                            };
-                            window.paint_quad(fill(
-                                Bounds {
-                                    origin: point(px(x), px(y)),
-                                    size: size(px(bar_w), px(bar_h)),
-                                },
-                                color,
-                            ));
-                        }
+                        paint_bars(
+                            bounds,
+                            &peaks,
+                            |i| {
+                                if (i as f32 + 0.5) / n as f32 <= progress {
+                                    played
+                                } else {
+                                    rest
+                                }
+                            },
+                            window,
+                        );
                     }
                     // Playhead.
                     let head_x = ox + w * progress;

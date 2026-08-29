@@ -1,5 +1,10 @@
-//! Bottom status bar: listing/selection summary on the left, background job
-//! progress and dock toggles on the right.
+//! Bottom status bar: listing/selection summary on the left, transfer progress
+//! and dock toggles on the right.
+//!
+//! The transfer segment is a click target, exactly like the git segment beside
+//! it: both are a summary that opens the panel holding the detail. It names the
+//! newest live job rather than aggregating, because a bar is one line and
+//! `2 copying · 1 waiting` is what the popover's headline is for.
 
 use gpui::{
     Context, InteractiveElement as _, IntoElement, ParentElement, StatefulInteractiveElement as _,
@@ -17,7 +22,7 @@ use gpui_component::{
 use crate::app::assets::PikuIcon;
 
 use crate::core::format::format_size;
-use crate::services::jobs::JobStatus;
+use crate::services::jobs::{JobStatus, label};
 use crate::state::PikuState;
 use crate::ui::shell::Workspace;
 
@@ -78,7 +83,14 @@ pub fn render_status_bar(workspace: &Workspace, cx: &mut Context<Workspace>) -> 
         })
     });
 
-    let job = state.jobs.read(cx).active_job().cloned();
+    // The newest live job, and how many others are live behind it. Cloned so
+    // the borrow of `state` ends here — `cx.listener` below needs it mutably.
+    let transfer = {
+        let jobs = state.jobs.read(cx);
+        jobs.active_job()
+            .cloned()
+            .map(|job| (job, jobs.active_count()))
+    };
     let dock_area = workspace.dock_area().clone();
 
     let mut left = h_flex()
@@ -130,35 +142,89 @@ pub fn render_status_bar(workspace: &Workspace, cx: &mut Context<Workspace>) -> 
     }
     let mut bar = StatusBar::new().left(left);
 
-    if let Some(job) = job
-        && job.status == JobStatus::Running
-    {
+    if let Some((job, live)) = transfer {
+        let id = job.id;
+        // Present for every live job, not just a running one. A transfer that
+        // stopped for an answer is the one worth finding, and hiding it until
+        // bytes move again is how it goes unnoticed.
+        let mut segment = h_flex()
+            .id("status-transfer-segment")
+            .px_1()
+            .gap_2()
+            .items_center()
+            .rounded(cx.theme().radius)
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().list_hover))
+            .child(
+                Icon::new(IconName::ArrowRight)
+                    .size(px(12.))
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .max_w(px(180.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(job.title.clone()),
+            );
+        if live > 1 {
+            segment = segment.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("+{} more", live - 1)),
+            );
+        }
+        // The state word, whenever it is not the unremarkable one. Waiting gets
+        // the brightest tier — the grayscale emphasis rule the git badges use —
+        // because it is the only state here that does not continue on its own.
+        if job.status != JobStatus::Running {
+            segment = segment.child(
+                div()
+                    .text_xs()
+                    .text_color(if job.status == JobStatus::WaitingForInput {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .child(label::status_label(&job.status)),
+            );
+        }
+        // Only once something has been counted. A bar at zero on a job still
+        // walking the tree reads as a stall rather than as an unknown size.
+        if job.total_bytes > 0 || job.total_items > 0 {
+            segment = segment.child(
+                div()
+                    .w(px(110.))
+                    .child(Progress::new("job-progress").value(job.percent())),
+            );
+        }
+
         bar = bar.right(
             h_flex()
                 .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(job.title.clone()),
-                )
-                .child(
-                    div()
-                        .w(px(110.))
-                        .child(Progress::new("job-progress").value(job.percent())),
-                )
+                .gap_1()
+                .child(segment.on_click(cx.listener(|workspace, _, _, cx| {
+                    workspace.toggle_transfer_popover(cx);
+                })))
+                // A sibling of the click target, not a child of it: cancelling
+                // and opening the popover are different intents, and one click
+                // must not do both.
                 .child(
                     Button::new("cancel-job")
                         .icon(IconName::Close)
                         .xsmall()
                         .ghost()
                         .tooltip("Cancel")
-                        .on_click(cx.listener(|_, _, _, cx| {
+                        // By id, not `cancel_active`: this button names the job
+                        // the segment named, and the newest live job may have
+                        // changed between the paint and the click.
+                        .on_click(cx.listener(move |_, _, _, cx| {
                             PikuState::global(cx)
                                 .jobs
                                 .clone()
-                                .update(cx, |jobs, cx| jobs.cancel_active(cx));
+                                .update(cx, |jobs, cx| jobs.cancel(id, cx));
                         })),
                 ),
         );

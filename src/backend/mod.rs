@@ -31,11 +31,13 @@ use crate::backend::path::PathPolicy;
 use crate::backend::runtime::BackendRuntime;
 use crate::backend::services::drive::DriveService;
 use crate::backend::services::preview::PreviewService;
+use crate::backend::services::transfer::TransferService;
 
 struct BackendInner {
     rt: &'static BackendRuntime,
     drive: DriveService,
     preview: PreviewService,
+    transfer: TransferService,
 }
 
 /// Cheap-to-clone handle to every backend service.
@@ -52,12 +54,17 @@ impl Backend {
     /// backend.
     pub fn new() -> Option<Self> {
         let rt = runtime::get()?;
+        // One policy, built once and shared: `with_system_roots` probes drive
+        // letters on Windows, which is not something to redo per service, let
+        // alone per request.
+        let policy = PathPolicy::with_system_roots();
         Some(Self(Arc::new(BackendInner {
             rt,
             drive: DriveService::new(rt),
-            // One policy, built once: `with_system_roots` probes drive letters
-            // on Windows, which is not something to redo per request.
-            preview: PreviewService::new(rt, PathPolicy::with_system_roots()),
+            preview: PreviewService::new(rt, policy.clone()),
+            // No post-transfer sinks yet, which makes the pipeline a null check.
+            // Indexing, persistence, and thumbnails register here when they land.
+            transfer: TransferService::new(rt, policy, Vec::new()),
         })))
     }
 
@@ -67,6 +74,10 @@ impl Backend {
 
     pub fn preview(&self) -> &PreviewService {
         &self.0.preview
+    }
+
+    pub fn transfer(&self) -> &TransferService {
+        &self.0.transfer
     }
 
     // `allow`, not `expect`: used by the tests below but not yet by the
@@ -83,6 +94,13 @@ impl Backend {
     /// executor and enforces its own 200 ms timeout there, so blocking would
     /// freeze the window and defeat that timeout.
     pub async fn shutdown(&self) -> bool {
+        // Transfers first, and explicitly. The runtime's own token would reach
+        // them a moment later, but a copy's cancel flag is polled by a blocking
+        // thread between 1 MB chunks, so it needs the whole grace period — not
+        // whatever is left of it. Cancelling here is also what leaves no partial
+        // destination file behind: the chunk loop unwinds and removes it, which a
+        // killed thread could not do.
+        self.0.transfer.shutdown();
         self.0.rt.shutdown().await
     }
 }

@@ -130,11 +130,52 @@ check_no_raw_paths_in_ui() {
     fi
 }
 
+# --- 6. External programs are never handed a shell or an interpolated arg --
+# A filename is attacker-controlled input: it can contain spaces, quotes,
+# semicolons, backticks, newlines, and `$(...)`. Two rules keep it from
+# becoming a command.
+#
+#   a) Never spawn a shell. `Command::new("sh").arg("-c")` re-parses whatever
+#      it is given, so a filename becomes syntax. Spawn the target program
+#      directly and pass each argument as its own `.arg()` — Rust's process
+#      API hands them to `execvp` as a vector, with no parsing step.
+#   b) Never build one argument with `format!`. Even without a shell, a glued
+#      `--input=<path>` string can start with `-` and be read as another
+#      option. Structured arguments keep the boundary explicit.
+#
+# The gate is not vacuous: every `Command::new` in the tree today passes
+# `ffmpeg_sidecar::paths::ffmpeg_path()` as the executable and its paths as
+# separate `.arg()` values. This is what keeps that true when an archive or
+# OCR helper arrives.
+#
+# `format!` inside `.arg(` is occasionally right — a numeric flag value like
+# `.arg(format!("{fps}"))` has no path in it. Those lines carry an explicit
+# `arg-format-ok:` marker with the reason, the same escape shape gate 5 uses.
+check_no_shell_interpolation() {
+    local name="external programs get argument arrays, never a shell"
+    local shells args hits
+    shells=$(grep -rnE 'Command::new\([[:space:]]*"(sh|bash|zsh|dash|cmd|cmd\.exe|powershell|powershell\.exe|pwsh)"' \
+        src/ --include='*.rs' || true)
+    args=$(grep -rnE '\.arg\([[:space:]]*&?format!' src/ --include='*.rs' \
+        | grep -v 'arg-format-ok:' || true)
+    # `sort -u`: a single bad line usually trips both sub-checks at once, and
+    # reporting it twice reads as two problems.
+    hits=$(printf '%s\n%s' "$shells" "$args" | grep -v '^$' | sort -u || true)
+    if [ -n "$hits" ]; then
+        fail "$name" \
+            "Spawn the program directly and pass each argument as its own .arg(), so a filename cannot become syntax. If an interpolated argument provably contains no path, append an 'arg-format-ok: <reason>' comment on that line." \
+            "$hits"
+    else
+        ok "$name"
+    fi
+}
+
 check_no_gpui_in_services
 check_spawn_blocking_confined
 check_no_credentials_in_state
 check_no_interpolated_sql
 check_no_raw_paths_in_ui
+check_no_shell_interpolation
 
 if [ "$failed" -ne 0 ]; then
     printf '\n%s\n' "One or more architectural invariants were violated." >&2
