@@ -1,3 +1,4 @@
+pub mod atlas_reaper;
 pub mod audio_player;
 pub mod drive_scan;
 pub mod ffmpeg_audio;

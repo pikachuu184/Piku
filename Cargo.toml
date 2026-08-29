@@ -58,6 +58,10 @@ serde_json = "1"
 futures = "0.3"
 rust-embed = "8"
 tracing = "0.1"
+# `tracing-log` comes in as a default feature, and with it `SubscriberBuilder::init`
+# bridges gpui's and wgpu's `log` records into the subscriber. Do not disable
+# default features here without replacing that bridge: renderer diagnostics go
+# silent, which is how the last atlas crash arrived with nothing in front of it.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 notify = "8"
 trash = "5"

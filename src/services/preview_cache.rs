@@ -20,6 +20,7 @@ use std::sync::Arc;
 use gpui::{App, Entity, RenderImage};
 
 use crate::preview::content::{PreviewContent, PreviewImage};
+use crate::services::atlas_reaper;
 
 /// The key is defined by the service, not here, and the service echoes back the
 /// one it actually read under. That is what lets the media panel probe the cache
@@ -60,11 +61,11 @@ impl PreviewCache {
     /// (see [`cacheable`]); otherwise inserts and evicts back under budget.
     ///
     /// Returns every `RenderImage` that left the cache — replaced or evicted —
-    /// because each one owns a sprite-atlas tile that nothing but
-    /// `App::drop_image` frees. Dropping the `Arc` alone leaks GPU memory for
-    /// the life of the process. Returning them rather than taking a `&mut App`
-    /// keeps this type testable without a gpui harness.
-    #[must_use = "the returned images still own GPU memory; pass them to App::drop_image"]
+    /// because each one owns a sprite-atlas tile that nothing but the reaper
+    /// frees. Dropping the `Arc` alone leaks GPU memory for the life of the
+    /// process. Returning them rather than taking a `&mut App` keeps this type
+    /// testable without a gpui harness.
+    #[must_use = "the returned images still own GPU memory; pass them to services::atlas_reaper::release_later"]
     pub fn insert(
         &mut self,
         key: PreviewKey,
@@ -81,8 +82,8 @@ impl PreviewCache {
                 self.lru.remove(pos);
             }
             // Re-inserting the *same* payload (both panels cache one decode) is
-            // not a discard — releasing those tiles would only force a re-upload
-            // of images still on screen.
+            // not a discard: the entry that "left" is the one still held, so
+            // listing it would park a live image for no reason.
             if !Arc::ptr_eq(&old, &content) {
                 content_images(&old, &mut dropped);
             }
@@ -117,8 +118,11 @@ impl PreviewCache {
 ///
 /// Deliberately shaped like [`estimated_bytes`] and kept next to it: a variant
 /// that holds an image and is billed by one but missed by the other is exactly
-/// how a leak comes back. An image still referenced elsewhere is safe to list —
-/// `paint_image` re-interns on a miss, so the worst case is one re-upload.
+/// how a leak comes back. Listing an image another owner still holds is safe
+/// *because* release goes through
+/// [`atlas_reaper`](crate::services::atlas_reaper), which will not free a tile
+/// until nothing can paint it — this must not be read as licence to free one
+/// eagerly.
 fn content_images(content: &PreviewContent, out: &mut Vec<Arc<RenderImage>>) {
     match content {
         PreviewContent::Image {
@@ -136,8 +140,7 @@ fn content_images(content: &PreviewContent, out: &mut Vec<Arc<RenderImage>>) {
     }
 }
 
-/// Cache `content` under `key`, freeing the atlas tiles of whatever that
-/// displaced.
+/// Cache `content` under `key`, handing whatever that displaced to the reaper.
 ///
 /// The inspector and the media panel both decode-then-cache on the same shape of
 /// callback, and both have to release what [`PreviewCache::insert`] hands back.
@@ -150,10 +153,11 @@ pub fn cache_preview(
     cx: &mut App,
 ) {
     for image in cache.update(cx, |c, _| c.insert(key, content)) {
-        // `None`: these callbacks run from the foreground executor rather than
-        // inside a window update, so every window that could have painted the
-        // image is reachable through `App`.
-        cx.drop_image(image, None);
+        // Not `drop_image`: eviction is blind to what is on screen. The panel
+        // still displaying an evicted preview holds its own `Arc` and is not
+        // marked dirty by a cache update, so its cached subtree keeps replaying
+        // the tile. The reaper waits until that `Arc` is gone.
+        atlas_reaper::release_later(image, cx);
     }
 }
 

@@ -12,16 +12,24 @@
 //! Every decoded frame is a distinct `RenderImage`, and painting one interns its
 //! pixels into the window's sprite atlas under a globally unique id. `RenderImage`
 //! has no `Drop` impl and `ImageSource::Render` never releases anything, so the
-//! *only* thing that frees that tile is [`Window::drop_image`]. A 960-wide frame
+//! *only* thing that frees that tile is a `drop_image` call. A 960-wide frame
 //! cannot pack twice into gpui's 1024² atlas texture, so without an explicit
 //! release each painted frame permanently owned ~4 MiB of VRAM — roughly
 //! 120 MiB/s at 30 fps, which is why playback degraded the longer it ran.
 //!
-//! So this view keeps the last two painted frames ([`VideoView::shown`] and
-//! [`VideoView::retired`]) and releases a tile only once two further frames have
-//! been painted over it, and an `on_release` hook frees the final two whenever the
-//! view goes away. Releasing is always *safe* rather than merely tolerable:
-//! `paint_image` re-interns on a miss, so an early release costs one re-upload.
+//! Release is *not* safe to do promptly, and this view used to think it was: it
+//! kept a two-deep history of painted frames and freed the third on the theory
+//! that "`paint_image` re-interns on a miss, so an early release costs one
+//! re-upload". That is true of a future paint and false of an already-recorded
+//! scene, which gpui can present again without drawing and can replay through a
+//! cached view for an unbounded number of frames. Freeing a tile that either of
+//! those still names panics the renderer.
+//!
+//! So this view now keeps only the frame it last painted ([`VideoView::shown`])
+//! and hands the one it replaces to
+//! [`atlas_reaper`](crate::services::atlas_reaper), which owns the timing rule.
+//! The hand-rolled two-frame delay is gone: it was a weaker version of the same
+//! idea, and two competing delay mechanisms is how the unsound one survives.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -44,6 +52,7 @@ use gpui_component::{
 use crate::app::assets::PikuIcon;
 use crate::backend::dispatch::BackendExt as _;
 use crate::backend::error::BackendError;
+use crate::services::atlas_reaper;
 use crate::services::video_player::VideoPlayer;
 use crate::ui::media::transport::fmt_clock;
 
@@ -62,13 +71,9 @@ pub struct VideoView {
     fullscreen: bool,
     controls_visible: bool,
     hide_at: Option<Instant>,
-    /// The frame painted by the previous render pass.
+    /// The frame this view last painted, still holding its atlas tile. Handed to
+    /// the reaper when another frame replaces it.
     shown: Option<Arc<RenderImage>>,
-    /// The frame painted the pass before that, still holding its atlas tile.
-    /// Released once a third frame has been painted over it — see the module
-    /// note; dropping a tile the in-flight scene still points at is what the
-    /// delay avoids.
-    retired: Option<Arc<RenderImage>>,
 }
 
 impl VideoView {
@@ -80,14 +85,11 @@ impl VideoView {
             controls_visible: true,
             hide_at: None,
             shown: None,
-            retired: None,
         };
         view.start_ticker(cx);
-        // The last two frames still hold atlas tiles when the view goes away
-        // (panel closed, another file opened). `Drop` cannot free them — it has
-        // neither a `Window` nor an `App` — but a release hook does. It runs
-        // during effect flushing, after the window has been handed back, so
-        // `drop_image` reaches every window that painted the frame.
+        // The last painted frame still holds an atlas tile when the view goes
+        // away (panel closed, another file opened). `Drop` cannot hand it over —
+        // it has neither a `Window` nor an `App` — but a release hook can.
         cx.on_release(|this, cx| this.release_images(cx)).detach();
         // The player starts silent: opening the file and building the audio
         // decoder is blocking work, and this constructor runs inside `cx.new`
@@ -107,19 +109,14 @@ impl VideoView {
         view
     }
 
-    /// Free the atlas tiles of every frame this view still holds.
+    /// Hand the atlas tile of every frame this view still holds to the reaper.
     ///
     /// Called from the release hook registered in [`VideoView::new`]. Without it
-    /// the last two frames of every video ever opened stay resident for the life
-    /// of the process.
+    /// the last frame of every video ever opened stays resident for the life of
+    /// the process.
     fn release_images(&mut self, cx: &mut App) {
-        for image in [self.retired.take(), self.shown.take()]
-            .into_iter()
-            .flatten()
-        {
-            // `None`: no window is mid-update here, so every window that could
-            // have painted the frame is reachable through `App`.
-            cx.drop_image(image, None);
+        if let Some(image) = self.shown.take() {
+            atlas_reaper::release_later(image, cx);
         }
     }
 
@@ -161,8 +158,8 @@ impl VideoView {
         self.hide_at = Some(Instant::now() + CONTROLS_HIDE_AFTER);
     }
 
-    /// Advance the two-deep history of painted frames, freeing the atlas tile of
-    /// whatever falls off the end.
+    /// Record the frame this pass paints, handing the one it replaces to the
+    /// reaper.
     ///
     /// `next` is what this pass is about to paint. Nothing happens while it is
     /// the same image as last pass (a paused player, or a tick between frames),
@@ -171,7 +168,12 @@ impl VideoView {
     /// Frames the player skipped past without ever handing here were never
     /// painted and hold no tile, so they need no release — dropping their `Arc`
     /// is enough.
-    fn rotate_frame(&mut self, next: Option<&Arc<RenderImage>>, window: &mut Window) {
+    ///
+    /// This runs inside `render`, which is why it goes through the reaper and not
+    /// `window.refresh()`: refreshing mid-draw is a no-op
+    /// (`Window::refresh` requires `not_drawing`), and freeing here would target
+    /// the tile the scene being recorded is about to reference.
+    fn rotate_frame(&mut self, next: Option<&Arc<RenderImage>>, cx: &mut App) {
         let unchanged = match (self.shown.as_ref(), next) {
             (Some(shown), Some(next)) => Arc::ptr_eq(shown, next),
             (None, None) => true,
@@ -180,19 +182,15 @@ impl VideoView {
         if unchanged {
             return;
         }
-        if let Some(old) = self.retired.take() {
-            // Two frames have been painted over this one, so no scene still
-            // references its tile.
-            let _ = window.drop_image(old);
+        if let Some(old) = std::mem::replace(&mut self.shown, next.cloned()) {
+            atlas_reaper::release_later(old, cx);
         }
-        self.retired = self.shown.take();
-        self.shown = next.cloned();
     }
 
-    fn surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn surface(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let height = if self.fullscreen { 640.0 } else { 380.0 };
         let frame = self.player.current_frame();
-        self.rotate_frame(frame.as_ref(), window);
+        self.rotate_frame(frame.as_ref(), cx);
 
         let body: AnyElement = match frame {
             Some(image) => img(ImageSource::Render(image))
@@ -574,13 +572,13 @@ fn trim_speed(speed: f32) -> String {
 }
 
 impl Render for VideoView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _pass = crate::app::diagnostics::enter_render("VideoView");
         div()
             .id("piku-video-view")
             .track_focus(&self.focus_handle)
             .w_full()
-            .child(self.surface(window, cx))
+            .child(self.surface(cx))
     }
 }
 

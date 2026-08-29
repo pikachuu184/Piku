@@ -37,6 +37,10 @@ pub fn run() {
             return;
         }
         crate::ui::register_panels(cx);
+        // The only path that frees a sprite-atlas tile. Started before the
+        // window exists because it tolerates having none, and after it there is
+        // no second bootstrap point that runs on every launch.
+        crate::services::atlas_reaper::init(cx);
         cx.activate(true);
 
         // Drain outstanding backend work before the process goes away, so an

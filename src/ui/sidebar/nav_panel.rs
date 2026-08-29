@@ -578,8 +578,12 @@ impl Panel for NavPanel {
         Self::PANEL_NAME
     }
 
+    /// No label. The left dock holds this panel alone under `PanelStyle::Auto`,
+    /// so `TabPanel` renders a returned title as a 30 px header — chrome the
+    /// other panels in that position do not get. The strip itself stays, because
+    /// the dock's collapse button lives in it.
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        "Navigation"
+        gpui::Empty
     }
 
     fn closable(&self, _: &App) -> bool {
