@@ -1492,7 +1492,10 @@ impl Panel for ExplorerPanel {
     }
 
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.tab_title())
+        // Return `None` so the tab strip renders `title()` (an element) instead
+        // of a bare string — that is the only hook the vendored tab render
+        // gives us to embed the close button next to the label.
+        None
     }
 
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1501,6 +1504,14 @@ impl Panel for ExplorerPanel {
         let icon = match self.session.storage {
             crate::state::pane_state::StorageKind::Local => IconName::Folder,
         };
+        // Pinned tabs are not closable, so they get no X (see `closable`).
+        let close = (!self.session.pinned).then(|| {
+            crate::ui::components::tab_close_button(
+                SharedString::from(format!("explorer-tab-close-{}", cx.entity_id())),
+                self.tab_panel.clone(),
+                Arc::new(cx.entity()),
+            )
+        });
         gpui_component::h_flex()
             .gap_1()
             .items_center()
@@ -1510,6 +1521,7 @@ impl Panel for ExplorerPanel {
                     .text_color(cx.theme().muted_foreground),
             )
             .child(self.tab_title())
+            .children(close)
     }
 
     /// Pin/search/branch badges after the tab label. Kept cheap — this runs

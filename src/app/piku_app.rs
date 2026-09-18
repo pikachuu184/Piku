@@ -1,6 +1,8 @@
 //! Application bootstrap: asset source, component init, theme, state, window.
 
-use gpui::{AppContext as _, Bounds, WindowBounds, WindowKind, WindowOptions, px, size};
+use gpui::{
+    AppContext as _, Bounds, WindowBounds, WindowDecorations, WindowKind, WindowOptions, px, size,
+};
 use gpui_component::{Root, TitleBar};
 
 use crate::app::assets::PikuAssets;
@@ -71,6 +73,12 @@ pub fn run() {
                 titlebar: Some(TitleBar::title_bar_options()),
                 window_min_size: Some(size(px(960.), px(600.))),
                 kind: WindowKind::Normal,
+                // Draw our own title bar on every OS. Without this gpui defaults
+                // to `WindowDecorations::Server`, so on Linux the window manager
+                // draws a native title bar on top of the custom one — two bars.
+                // gpui-component's `TitleBar`/`Root` already handle the
+                // client-decorated path (drag/move, min/max/close, resize borders).
+                window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
             };
 

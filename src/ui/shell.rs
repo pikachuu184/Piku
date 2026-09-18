@@ -17,7 +17,8 @@ use gpui_component::{
 
 use crate::app::actions::{
     CreateWorkspace, DeleteWorkspace, DuplicateTab, DuplicateWorkspace, NewTab, OpenMediaPanel,
-    PinTab, PreviewActualSize, PreviewFit, PreviewFitWidth, PreviewNextPage, PreviewPrevPage,
+    OpenPathInNewTab, PinTab, PreviewActualSize, PreviewFit, PreviewFitWidth, PreviewNextPage,
+    PreviewPrevPage,
     PreviewResetView, PreviewRotate, PreviewZoomIn, PreviewZoomOut, RemoveRecentPath,
     RenameWorkspace, RevealPreview, ShowAbout, SplitDown, SplitRight, SwitchWorkspace,
     ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath, ToggleRightDock, ToggleTransferCenter,
@@ -37,6 +38,37 @@ const DOCK_VERSION: usize = 1;
 /// Relative path of the active workspace's layout file.
 fn active_layout_file(cx: &App) -> String {
     WorkspaceStore::layout_file(PikuState::global(cx).workspaces.read(cx).active_id())
+}
+
+/// Whether a saved center subtree cannot be restored cleanly. A structural
+/// container ("StackPanel"/"TabPanel") serialized as a leaf `PanelInfo::Panel`
+/// is what an emptied dock dumps to, and it rebuilds as an `InvalidPanel`
+/// "unnamed" tab; a previously-built `InvalidPanel` node re-dumps the same way.
+/// Either signature, anywhere in the tree, means we should reset to default.
+fn layout_is_corrupt(state: &PanelState) -> bool {
+    if state.panel_name == "InvalidPanel" {
+        return true;
+    }
+    let is_structural = matches!(state.panel_name.as_str(), "StackPanel" | "TabPanel");
+    if is_structural && matches!(state.info, PanelInfo::Panel(_)) {
+        return true;
+    }
+    state.children.iter().any(layout_is_corrupt)
+}
+
+/// Whether a dumped center subtree contains at least one real panel. A leaf
+/// node is a real panel unless it is a structural container that dumped empty
+/// ("StackPanel"/"TabPanel" with no children) or an `InvalidPanel`. Read from a
+/// `dump` (live entities), never from the possibly-stale `DockArea::center`.
+fn state_has_panel(state: &PanelState) -> bool {
+    if state.children.is_empty() {
+        !matches!(
+            state.panel_name.as_str(),
+            "StackPanel" | "TabPanel" | "InvalidPanel"
+        )
+    } else {
+        state.children.iter().any(state_has_panel)
+    }
 }
 
 pub struct Workspace {
@@ -75,6 +107,18 @@ impl Workspace {
             window,
             |this: &mut Self, dock_area, event: &DockEvent, window, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
+                    // Never leave the center empty. Closing the last tab would
+                    // otherwise strand the workspace (nothing to click into) and
+                    // persist a corrupt "empty StackPanel" layout that cannot be
+                    // restored (see the note in `load_layout`). Reopen a home
+                    // tab instead so there is always at least one pane.
+                    if !this.center_has_panel(cx) {
+                        this.open_path_in_new_tab(
+                            crate::services::fs_service::home_dir(),
+                            window,
+                            cx,
+                        );
+                    }
                     this.save_layout_debounced(dock_area.clone(), window, cx);
                 }
             },
@@ -138,6 +182,20 @@ impl Workspace {
         if state.version != Some(DOCK_VERSION) {
             anyhow::bail!("layout version changed");
         }
+        // Bail on a corrupt center so we fall back to the default layout.
+        //
+        // gpui-component's `StackPanel::dump` only stamps the `Stack` info while
+        // iterating children, so an *empty* stack (every tab closed) serializes
+        // as a leaf `PanelInfo::Panel` named "StackPanel". Restoring that asks
+        // the registry to build a "StackPanel" — not a registered panel type —
+        // which yields an `InvalidPanel`: an "unnamed" tab whose body reads
+        // "... is not registered in PanelRegistry". Worse, once loaded that
+        // InvalidPanel re-dumps the same bad node, so it survives restarts. Detect
+        // the signature (a structural container serialized as a leaf, or an
+        // InvalidPanel node) anywhere in the tree and reset instead.
+        if layout_is_corrupt(&state.center) {
+            anyhow::bail!("saved layout has a corrupt center");
+        }
         // The center root must always be a StackPanel: TabPanel::split_panel
         // silently no-ops when a TabPanel has no parent stack, which is what
         // broke splitting on layouts saved with a bare-TabPanel center.
@@ -174,11 +232,7 @@ impl Workspace {
         };
 
         let home = crate::services::fs_service::home_dir();
-        let explorer = cx.new(|cx| ExplorerPanel::from_session(PaneSession::at(home), window, cx));
-        let tabs = DockItem::tabs(vec![Arc::new(explorer)], dock_area, window, cx);
-        // Wrap in a StackPanel so both split directions work from the first
-        // pane (see the invariant note in `load_layout`).
-        let center = DockItem::split(gpui::Axis::Horizontal, vec![tabs], dock_area, window, cx);
+        let center = Self::build_center(home, dock_area, window, cx);
 
         let nav = cx.new(|cx| NavPanel::new(window, cx));
         let left = DockItem::tab(nav, dock_area, window, cx);
@@ -201,6 +255,28 @@ impl Workspace {
                 cx,
             );
         });
+    }
+
+    /// Build a fresh center holding a single explorer tab at `path`, wrapped in
+    /// a StackPanel so both split directions work from the first pane (the
+    /// invariant `load_layout` relies on).
+    fn build_center(
+        path: PathBuf,
+        dock_area: &WeakEntity<DockArea>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DockItem {
+        let explorer = cx.new(|cx| ExplorerPanel::from_session(PaneSession::at(path), window, cx));
+        let tabs = DockItem::tabs(vec![Arc::new(explorer)], dock_area, window, cx);
+        DockItem::split(gpui::Axis::Horizontal, vec![tabs], dock_area, window, cx)
+    }
+
+    /// Whether the center currently holds a real panel. Read from a fresh
+    /// `dump` (which reflects the live panel entities) rather than from
+    /// `DockArea::center`: closing a tab mutates the panel entities but leaves
+    /// the center `DockItem` tree stale, so that tree cannot be trusted here.
+    fn center_has_panel(&self, cx: &App) -> bool {
+        state_has_panel(&self.dock_area.read(cx).dump(cx).center)
     }
 
     fn save_layout_debounced(
@@ -244,6 +320,28 @@ impl Workspace {
     fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         let session = self.active_session(cx);
         let panel = cx.new(|cx| ExplorerPanel::from_session(session, window, cx));
+        self.dock_area.update(cx, |dock_area, cx| {
+            dock_area.add_panel(Arc::new(panel), DockPlacement::Center, None, window, cx);
+        });
+    }
+
+    /// Open a fresh explorer tab pointed at `path`. Used when sidebar navigation
+    /// has no pane to steer — chiefly after the last tab was closed — so the
+    /// center is never left empty and unclickable.
+    fn open_path_in_new_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // When the center is empty its `DockItem` tree is stale: the closed
+        // TabPanel detached from the root StackPanel but still lingers in the
+        // tree, so `add_panel` would attach the new tab to that orphaned panel
+        // and render nothing. Rebuild the center from scratch instead.
+        if !self.center_has_panel(cx) {
+            let weak = self.dock_area.downgrade();
+            let center = Self::build_center(path, &weak, window, cx);
+            self.dock_area.update(cx, |dock_area, cx| {
+                dock_area.set_center(center, window, cx);
+            });
+            return;
+        }
+        let panel = cx.new(|cx| ExplorerPanel::from_session(PaneSession::at(path), window, cx));
         self.dock_area.update(cx, |dock_area, cx| {
             dock_area.add_panel(Arc::new(panel), DockPlacement::Center, None, window, cx);
         });
@@ -638,6 +736,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, action: &OpenMediaPanel, window, cx| {
                 this.open_media_panel(action.0.clone(), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &OpenPathInNewTab, window, cx| {
+                this.open_path_in_new_tab(action.0.clone(), window, cx);
             }))
             .on_action(cx.listener(Self::on_show_about))
             .on_action(cx.listener(Self::on_toggle_transfer_center))

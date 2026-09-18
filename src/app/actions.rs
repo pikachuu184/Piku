@@ -31,6 +31,13 @@ pub struct SwitchWorkspace(pub String);
 #[action(namespace = piku, no_json)]
 pub struct OpenMediaPanel(pub PathBuf);
 
+/// Open `path` in a new explorer tab. Dispatched by sidebar navigation when
+/// there is no explorer pane to steer (e.g. the user closed the last tab), so
+/// the workspace is never left with nothing to click into.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = piku, no_json)]
+pub struct OpenPathInNewTab(pub PathBuf);
+
 /// Key context set on every explorer pane root, so file-management shortcuts
 /// never fight with text inputs.
 pub const EXPLORER_CONTEXT: &str = "Explorer";

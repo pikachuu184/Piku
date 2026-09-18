@@ -20,11 +20,19 @@ use crate::state::PikuState;
 /// Navigate whichever explorer pane is currently active. Used by the sidebar
 /// so navigation never spawns extra windows or panes.
 pub fn navigate_active(path: PathBuf, window: &mut Window, cx: &mut App) {
-    if let Some(weak) = PikuState::global(cx).active_explorer()
-        && let Some(panel) = weak.upgrade()
+    if let Some(panel) = PikuState::global(cx)
+        .active_explorer()
+        .and_then(|weak| weak.upgrade())
     {
         panel.update(cx, |panel, cx| {
             panel.navigate_to(path, window, cx);
         });
+    } else {
+        // No pane to steer — typically the last tab was closed. Open a fresh
+        // tab at the destination so the sidebar always does something.
+        window.dispatch_action(
+            Box::new(crate::app::actions::OpenPathInNewTab(path)),
+            cx,
+        );
     }
 }

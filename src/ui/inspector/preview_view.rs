@@ -280,7 +280,7 @@ pub(super) fn render_preview_box(
             audio_block(&path, rows, waveform, *duration_ms, cx),
             cx,
         ),
-        PreviewContent::Video { rows, poster } => video_block(&path, rows, poster.clone(), cx),
+        PreviewContent::Video { poster, .. } => video_block(&path, poster.clone(), cx),
         PreviewContent::Pdf { pages, note, .. } => {
             pdf_block(panel, surface, pages, note.as_ref(), cx)
         }
@@ -1378,7 +1378,6 @@ fn audio_block(
             cx,
         ))
         .child(open_in_panel_button("pv-audio-pop", path, cx))
-        .child(media_block(rows, cx))
         .into_any_element()
 }
 
@@ -1412,14 +1411,45 @@ fn open_in_panel_button(
 
 fn video_block(
     path: &Path,
-    rows: &[(SharedString, SharedString)],
     poster: Option<Arc<RenderImage>>,
     cx: &mut Context<InspectorPanel>,
 ) -> AnyElement {
-    let mut column = v_flex().size_full();
+    let path_buf = path.to_path_buf();
+    let mut column = v_flex().size_full().gap_2();
+    // Controls first, in a single compact row pinned at the top, so they stay
+    // visible and well-fitted rather than floating at the bottom of a
+    // full-height poster (which is what happened once the metadata was removed).
+    column = column.child(
+        h_flex()
+            .flex_none()
+            .flex_wrap()
+            .gap_1()
+            .px_2()
+            .pt_2()
+            .child(
+                Button::new("pv-video-open")
+                    .ghost()
+                    .xsmall()
+                    .icon(PikuIcon::ExternalLink)
+                    .label("Play in default app")
+                    .tooltip("Open in your system's video player")
+                    // Through `shell_open`, not `open::that_detached`
+                    // directly: it re-authorizes the *resolved* target, so a
+                    // link inside an allowed root cannot hand the OS handler
+                    // something outside it.
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        let name = path_buf
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned()) // raw-path-ok: shell_open sanitizes it
+                            .unwrap_or_default();
+                        crate::ui::explorer::shell_open(&name, &path_buf, window, cx);
+                    })),
+            )
+            .child(open_in_panel_button("pv-video-pop", path, cx)),
+    );
     if let Some(image) = poster {
-        // The poster takes the room the metadata does not, rather than a fixed
-        // 240 px — a video preview is mostly the frame.
+        // The poster fills the room below the controls — a video preview is
+        // mostly the frame.
         column = column.child(
             div()
                 .relative()
@@ -1444,45 +1474,7 @@ fn video_block(
                 ),
         );
     }
-    let path_buf = path.to_path_buf();
-    column
-        .child(
-            h_flex().flex_none().gap_1().px_2().pt_2().child(
-                Button::new("pv-video-open")
-                    .ghost()
-                    .xsmall()
-                    .icon(PikuIcon::ExternalLink)
-                    .label("Play in default app")
-                    .tooltip("Open in your system's video player")
-                    // Through `shell_open`, not `open::that_detached`
-                    // directly: it re-authorizes the *resolved* target, so a
-                    // link inside an allowed root cannot hand the OS handler
-                    // something outside it.
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        let name = path_buf
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned()) // raw-path-ok: shell_open sanitizes it
-                            .unwrap_or_default();
-                        crate::ui::explorer::shell_open(&name, &path_buf, window, cx);
-                    })),
-            ),
-        )
-        .child(
-            div()
-                .flex_none()
-                .px_2()
-                .child(open_in_panel_button("pv-video-pop", path, cx)),
-        )
-        .child(
-            div()
-                .id("pv-video-meta")
-                .flex_none()
-                .max_h(px(180.))
-                .overflow_y_scroll()
-                .p_2()
-                .child(media_block(rows, cx)),
-        )
-        .into_any_element()
+    column.into_any_element()
 }
 
 // -- PDF --------------------------------------------------------------------
@@ -1622,32 +1614,6 @@ fn pdf_actions(
                 .on_click(cx.listener(|this, _, _, cx| this.preview_step_page(1, cx))),
         )
         .child(zoom_controls(panel, surface, cx))
-        .into_any_element()
-}
-
-fn media_block(rows: &[(SharedString, SharedString)], cx: &Context<InspectorPanel>) -> AnyElement {
-    v_flex()
-        .w_full()
-        .p_2()
-        .gap_2()
-        .rounded(cx.theme().radius)
-        .bg(cx.theme().muted)
-        .children(rows.iter().map(|(label, value)| {
-            v_flex()
-                .gap_0p5()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label.clone()),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().foreground)
-                        .child(value.clone()),
-                )
-        }))
         .into_any_element()
 }
 

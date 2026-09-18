@@ -13,12 +13,12 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon,
     button::{Button, ButtonVariants as _},
-    dock::{Panel, PanelControl, PanelEvent, PanelInfo, PanelState},
+    dock::{Panel, PanelControl, PanelEvent, PanelInfo, PanelState, TabPanel},
     h_flex, v_flex,
 };
 
@@ -44,6 +44,9 @@ pub struct MediaPanel {
     /// In-app video player, created when a video file is opened (its own decode
     /// pipeline; the `loaded` content only supplies the metadata rows).
     video: Option<gpui::Entity<VideoView>>,
+    /// The tab strip this panel lives in, captured in `on_added_to`. Used by the
+    /// tab close button to remove exactly this panel.
+    tab_panel: Option<WeakEntity<TabPanel>>,
     _audio: Subscription,
 }
 
@@ -61,6 +64,7 @@ impl MediaPanel {
             loading: false,
             preview_req: None,
             video: None,
+            tab_panel: None,
             _audio: audio_sub,
         }
     }
@@ -161,10 +165,9 @@ impl MediaPanel {
                         *duration_ms,
                         cx,
                     ))
-                    .child(rows_block(rows, cx))
                     .into_any_element()
             }
-            Some(PreviewContent::Video { rows, .. }) => {
+            Some(PreviewContent::Video { .. }) => {
                 let open_path = path.clone();
                 let mut column = v_flex().w_full().gap_3();
                 // The in-app player (created in `open`); falls back to a poster
@@ -191,7 +194,6 @@ impl MediaPanel {
                                 crate::ui::explorer::shell_open(&name, &open_path, window, cx);
                             })),
                     )
-                    .child(rows_block(rows, cx))
                     .into_any_element()
             }
             _ => message(cx, "This file cannot be played here."),
@@ -199,33 +201,6 @@ impl MediaPanel {
         self.loaded = content;
         element
     }
-}
-
-/// Label/value metadata rows on a muted card.
-fn rows_block(rows: &[(SharedString, SharedString)], cx: &Context<MediaPanel>) -> AnyElement {
-    v_flex()
-        .w_full()
-        .p_2()
-        .gap_2()
-        .rounded(cx.theme().radius)
-        .bg(cx.theme().muted)
-        .children(rows.iter().map(|(label, value)| {
-            v_flex()
-                .gap_0p5()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label.clone()),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().foreground)
-                        .child(value.clone()),
-                )
-        }))
-        .into_any_element()
 }
 
 /// A large placeholder tile with a centered glyph (audio artwork / no poster).
@@ -291,7 +266,9 @@ impl Panel for MediaPanel {
     }
 
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.file_name())
+        // Return `None` so the tab strip renders `title()` (an element), letting
+        // us embed the close button next to the label. See `tab_close_button`.
+        None
     }
 
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -304,6 +281,11 @@ impl Panel for MediaPanel {
         } else {
             PikuIcon::Music
         };
+        let close = crate::ui::components::tab_close_button(
+            SharedString::from(format!("media-tab-close-{}", cx.entity_id())),
+            self.tab_panel.clone(),
+            Arc::new(cx.entity()),
+        );
         h_flex()
             .gap_1()
             .items_center()
@@ -313,10 +295,20 @@ impl Panel for MediaPanel {
                     .text_color(cx.theme().muted_foreground),
             )
             .child(self.file_name())
+            .child(close)
     }
 
     fn closable(&self, _: &App) -> bool {
         true
+    }
+
+    fn on_added_to(
+        &mut self,
+        tab_panel: WeakEntity<TabPanel>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        self.tab_panel = Some(tab_panel);
     }
 
     fn zoomable(&self, _: &App) -> Option<PanelControl> {
