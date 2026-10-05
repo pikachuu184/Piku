@@ -5,7 +5,7 @@ environment, the conventions the codebase follows, and the checks a pull request
 
 ## Development setup
 
-1. Install [Rust](https://rustup.rs) 1.85 or newer (edition 2024) and the platform prerequisites
+1. Install [Rust](https://rustup.rs) 1.96 or newer (edition 2024) and the platform prerequisites
    listed in the [README](README.md#building-from-source).
 2. Fork and clone the repository.
 3. Build and run:
@@ -22,6 +22,9 @@ environment, the conventions the codebase follows, and the checks a pull request
   `fix/waveform-render`.
 - Keep commits focused and write imperative, descriptive commit messages ("Add volume slider", not
   "added stuff").
+- Use [Conventional Commits](https://www.conventionalcommits.org/) when possible
+  (`feat:`, `fix:`, `docs:`, `ci:`). Merges to `main` are versioned automatically: `feat` creates a
+  minor release, breaking changes create a major release, and other changes create a patch release.
 - Rebase on `main` before opening a pull request so history stays linear.
 
 ## Before you open a pull request
@@ -30,13 +33,16 @@ Run the same checks CI runs:
 
 ```bash
 cargo fmt
-cargo clippy --all-targets
-cargo test
-cargo build --release
+cargo check --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo build --locked --release
+bash ci/invariants.sh
 ```
 
-Then open a pull request using the template. Fill in what changed, how it was tested, and which
-platforms you verified.
+The CI workflow also runs on Windows, macOS, and Linux, plus end-to-end runtime checks and
+dependency/security checks. Then open a pull request using the template. Fill in what changed, how
+it was tested, and which platforms you verified.
 
 ## Coding conventions
 

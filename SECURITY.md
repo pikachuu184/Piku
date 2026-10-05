@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please do not open a public issue for security-sensitive reports. Instead, use GitHub's private
-[security advisory](https://github.com/BotCoder254/piku/security/advisories/new) form to disclose the
+[security advisory](https://github.com/pikachuu184/Piku/security/advisories/new) form to disclose the
 issue privately.
 
 Include the affected version or commit, a description of the vulnerability, and, where possible, a

@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Calculate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: version
+        shell: bash
+        run: |
+          version="$(python3 ci/release_version.py)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "Release v$version already exists; nothing to publish."
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: version
+    if: needs.version.outputs.version != ''
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archive: tar.gz
+          - os: windows-latest
+            archive: zip
+          - os: macos-latest
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libxcb1-dev
+      - run: cargo build --locked --release
+      - name: Package Unix artifact
+        if: runner.os != 'Windows'
+        run: tar -czf "piku-${{ needs.version.outputs.version }}-${{ runner.os }}.tar.gz" -C target/release piku
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/release/piku.exe -DestinationPath "piku-${{ needs.version.outputs.version }}-Windows.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: piku-${{ runner.os }}
+          path: piku-${{ needs.version.outputs.version }}-*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [version, build]
+    if: needs.version.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          git tag "$TAG"
+          git push origin "$TAG"
+          find dist -type f -print
+          gh release create "$TAG" dist/*/* \
+            --title "PIKU $VERSION" \
+            --generate-notes \
+            --verify-tag

@@ -2,6 +2,13 @@
 name = "piku"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.96"
+description = "A fast, monochrome, GPU-accelerated desktop file manager built in Rust with GPUI."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/pikachuu184/Piku"
+keywords = ["file-manager", "desktop", "gpui", "rust"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 # Supply-chain pinning: the zed (gpui) crates are pinned via the committed

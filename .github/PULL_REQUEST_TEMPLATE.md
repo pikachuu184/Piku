@@ -20,11 +20,12 @@
 
 ## Checklist
 
-- [ ] `cargo build` succeeds
-- [ ] `cargo clippy` reports no new warnings
-- [ ] `cargo test` passes
+- [ ] `cargo check --locked --all-targets` succeeds
+- [ ] `cargo clippy --locked --all-targets -- -D warnings` reports no warnings
+- [ ] `cargo test --locked` passes
 - [ ] `cargo fmt` has been run
 - [ ] `bash ci/invariants.sh` passes (the four architectural gates)
+- [ ] Security-sensitive changes include tests and documentation
 - [ ] Preview providers keep their input untrusted (no `unwrap`/`expect`/`panic` in `src/backend/services/preview/`, size caps respected, cancellation checked in long loops)
 - [ ] UI changes follow the monochrome theme (only `cx.theme().*` tokens, `cx.theme().radius`, no new hues or shadows)
 - [ ] Documentation and comments updated where relevant

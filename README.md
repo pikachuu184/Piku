@@ -13,8 +13,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BotCoder254/piku/actions/workflows/ci.yml"><img src="https://github.com/BotCoder254/piku/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/rust-1.85%2B-informational" alt="Rust 1.85+">
+  <a href="https://github.com/pikachuu184/Piku/actions/workflows/ci.yml"><img src="https://github.com/pikachuu184/Piku/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/pikachuu184/Piku/releases"><img src="https://img.shields.io/github/v/release/pikachuu184/Piku?display_name=tag&sort=semver" alt="Latest release"></a>
+  <a href="https://github.com/pikachuu184/Piku/blob/main/LICENSE"><img src="https://img.shields.io/github/license/pikachuu184/Piku" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/rust-1.96%2B-informational" alt="Rust 1.96+">
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational" alt="Platforms">
 </p>
 
@@ -57,14 +59,14 @@ it for faster development builds).
 
 **Prerequisites**
 
-- [Rust](https://rustup.rs) 1.85 or newer (edition 2024)
+- [Rust](https://rustup.rs) 1.96 or newer (edition 2024)
 - Git
 
 **Windows**
 
 ```powershell
 rustup default stable-msvc
-git clone https://github.com/BotCoder254/piku.git
+git clone https://github.com/pikachuu184/Piku.git
 cd piku
 cargo build --release
 ```
@@ -73,7 +75,7 @@ cargo build --release
 
 ```bash
 xcode-select --install   # if the command line tools are not installed
-git clone https://github.com/BotCoder254/piku.git
+git clone https://github.com/pikachuu184/Piku.git
 cd piku
 cargo build --release
 ```
@@ -86,7 +88,7 @@ Debian/Ubuntu), then build:
 ```bash
 sudo apt install build-essential pkg-config libssl-dev libxkbcommon-dev \
   libwayland-dev libxcb1-dev vulkan-tools mesa-vulkan-drivers
-git clone https://github.com/BotCoder254/piku.git
+git clone https://github.com/pikachuu184/Piku.git
 cd piku
 cargo build --release
 ```
@@ -113,6 +115,9 @@ in one step.
 Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for the development
 workflow, coding conventions, and the checks that run in CI, and use the provided issue and pull
 request templates.
+
+New issues are automatically labeled and assigned for triage. Very close title matches are marked as
+duplicates, linked to the original issue, and closed to keep the issue tracker focused.
 
 ## Acknowledgements
 

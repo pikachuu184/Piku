@@ -48,7 +48,14 @@ impl ExplorerPanel {
                         acc.clone(),
                     ));
                 }
-                Component::RootDir => {}
+                Component::RootDir => {
+                    // Keep the root when rebuilding breadcrumb targets. On
+                    // Unix, omitting it turns `/home/user` into `home/user`,
+                    // which the path guard correctly rejects as relative.
+                    if acc.as_os_str().is_empty() {
+                        acc.push(component.as_os_str());
+                    }
+                }
                 _ => {
                     acc.push(component.as_os_str());
                     segments.push((
