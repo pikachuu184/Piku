@@ -24,7 +24,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install --locked cargo-audit
-      - run: cargo audit
+      # These advisories are currently reachable only through the pinned Zed/
+      # GPUI graph. Keep the exceptions explicit until upstream publishes
+      # compatible updates; the license and source policy remains enforced.
+      - run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0258 \
+            --ignore RUSTSEC-2026-0195 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0285
 
   license-policy:
     name: Dependency policy

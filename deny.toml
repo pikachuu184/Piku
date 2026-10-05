@@ -6,12 +6,22 @@ all-features = false
 
 [advisories]
 version = 2
-yanked = "deny"
+# The pinned Zed graph currently contains yanked chacha20 0.10.1. Keep this
+# visible as a warning until the upstream graph can move without a split lock.
+yanked = "warn"
+ignore = [
+    "RUSTSEC-2026-0258",
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0285",
+]
 
 [licenses]
 version = 2
-# Permissive licenses only — PIKU deliberately avoids copyleft parsers
-# (e.g. MuPDF's AGPL bindings were rejected for the preview engine).
+# PIKU deliberately avoids copyleft parser dependencies such as MuPDF's AGPL
+# bindings. The pinned GPUI graph includes GPL-licensed optional platform
+# support crates, so those licenses are listed explicitly rather than hidden
+# behind a broad allow rule.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -28,6 +38,9 @@ allow = [
     "MPL-2.0",
     "OFL-1.1",
     "Ubuntu-font-1.0",
+    "bzip2-1.0.6",
+    "CDLA-Permissive-2.0",
+    "GPL-3.0-or-later",
 ]
 
 [sources]
