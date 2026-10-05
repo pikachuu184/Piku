@@ -18,10 +18,10 @@ use gpui_component::{
 use crate::app::actions::{
     CreateWorkspace, DeleteWorkspace, DuplicateTab, DuplicateWorkspace, NewTab, OpenMediaPanel,
     OpenPathInNewTab, PinTab, PreviewActualSize, PreviewFit, PreviewFitWidth, PreviewNextPage,
-    PreviewPrevPage,
-    PreviewResetView, PreviewRotate, PreviewZoomIn, PreviewZoomOut, RemoveRecentPath,
-    RenameWorkspace, RevealPreview, ShowAbout, SplitDown, SplitRight, SwitchWorkspace,
-    ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath, ToggleRightDock, ToggleTransferCenter,
+    PreviewPrevPage, PreviewResetView, PreviewRotate, PreviewZoomIn, PreviewZoomOut,
+    RemoveRecentPath, RenameWorkspace, RevealPreview, ShowAbout, SplitDown, SplitRight,
+    SwitchWorkspace, ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath, ToggleRightDock,
+    ToggleTransferCenter,
 };
 use crate::state::PikuState;
 use crate::state::nav_model::NavModel;

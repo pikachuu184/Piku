@@ -30,9 +30,6 @@ pub fn navigate_active(path: PathBuf, window: &mut Window, cx: &mut App) {
     } else {
         // No pane to steer — typically the last tab was closed. Open a fresh
         // tab at the destination so the sidebar always does something.
-        window.dispatch_action(
-            Box::new(crate::app::actions::OpenPathInNewTab(path)),
-            cx,
-        );
+        window.dispatch_action(Box::new(crate::app::actions::OpenPathInNewTab(path)), cx);
     }
 }

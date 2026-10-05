@@ -288,7 +288,10 @@ mod tests {
         drop(owner);
         let batch = reaper.take_unreferenced();
         assert_eq!(batch.len(), 1);
-        assert!(reaper.pending.is_empty(), "a reaped image must not stay parked");
+        assert!(
+            reaper.pending.is_empty(),
+            "a reaped image must not stay parked"
+        );
     }
 
     /// Every image handed over must come back out exactly once.

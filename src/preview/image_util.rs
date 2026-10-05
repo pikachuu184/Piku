@@ -59,7 +59,8 @@ pub fn render_image_from_bgra_bytes(width: u32, height: u32, bgra: Vec<u8>) -> A
     reason = "kept for decoders that cannot choose their pixel order"
 )]
 pub fn render_image_from_rgba(mut rgba: image::RgbaImage) -> Arc<RenderImage> {
-    for pixel in rgba.chunks_exact_mut(4) {
+    let (pixels, _) = rgba.as_chunks_mut::<4>();
+    for pixel in pixels {
         pixel.swap(0, 2);
     }
     Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]))

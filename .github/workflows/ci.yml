@@ -46,7 +46,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev \
+          sudo apt-get install -y build-essential pkg-config libssl-dev libfontconfig1-dev \
             libxkbcommon-dev libwayland-dev libxcb1-dev
       - run: cargo check --locked --all-targets
       - run: cargo test --locked
@@ -62,7 +62,7 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev \
+          sudo apt-get install -y build-essential pkg-config libssl-dev libfontconfig1-dev \
             libxkbcommon-dev libwayland-dev libxcb1-dev
       - run: cargo check --locked
 
@@ -76,6 +76,6 @@ jobs:
       - name: Install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev \
+          sudo apt-get install -y build-essential pkg-config libssl-dev libfontconfig1-dev \
             libxkbcommon-dev libwayland-dev libxcb1-dev xvfb mesa-vulkan-drivers
       - run: xvfb-run -a bash ci/e2e.sh
