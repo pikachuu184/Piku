@@ -87,7 +87,7 @@ lofty = "0.22"
 # parser and options the renderer uses, so spans line up byte-for-byte.
 markdown = "1"
 # Audio playback + decoding (rodio bundles symphonia; broaden codec coverage).
-rodio = { version = "0.20", features = ["symphonia-all"] }
+rodio = { version = "0.22", features = ["symphonia-all"] }
 # Pure-Rust MP4/MOV metadata (duration, resolution, codec) — no ffmpeg needed.
 mp4 = "0.14"
 # Video posters/thumbnails: drives a standalone ffmpeg binary as an isolated
