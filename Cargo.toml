@@ -100,7 +100,7 @@ ffmpeg-sidecar = "2"
 pdfium-render = "0.8"
 # Structured-data tree: parse TOML/YAML into a common serde model (JSON is
 # already covered by serde_json).
-toml = "0.8"
+toml = "1.1"
 serde_yml = "0.0.12"
 
 # gpui_platform's Linux/FreeBSD windowing backends are opt-in features and
