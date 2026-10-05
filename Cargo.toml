@@ -80,7 +80,7 @@ sysinfo = "0.33"
 # Preview engine (all permissive MIT/Apache-2.0; default features trimmed to
 # keep the dependency tree and build time down).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "ico", "tiff"] }
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 lofty = "0.22"
 # Already in the lock file as a gpui-component dependency; promoting it to a
 # direct one costs nothing and lets `markdown_safe` parse with the *exact*
