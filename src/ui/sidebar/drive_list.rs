@@ -1,24 +1,27 @@
 //! Drive tiles with circular capacity rings: a thick donut whose colored
 //! segments are the per-category usage from the background drive scan
 //! (same palette as before — the one sanctioned hue exception), neutral
-//! free space on the ring track, and the free size centered in the hole.
+//! free space on the ring track, and the used percentage centered in the hole.
 //! Tiles flow two per row and wrap with the drive count.
 
-use gpui::{App, Div, Hsla, ParentElement, Styled, div, px};
-use gpui_component::{ActiveTheme as _, chart::PieChart, v_flex};
+use gpui::prelude::FluentBuilder as _;
+use gpui::{App, Div, Hsla, IntoElement, ParentElement, Styled, div, px, relative};
+use gpui_component::{ActiveTheme as _, chart::PieChart, menu::ContextMenuExt as _, v_flex};
 
+use crate::app::actions::SetDriveDisplay;
 use crate::core::file_type::FileCategory;
 use crate::core::format::format_size;
 use crate::services::drive_scan::SCAN_CATEGORIES;
 use crate::services::fs_service::DriveInfo;
 use crate::state::PikuState;
+use crate::state::nav_model::DriveDisplayMode;
 use crate::theme::category_colors::{NEAR_FULL_FRACTION, category_color, near_full_color};
 
-/// Ring geometry: hole ≈ 62% of the outer diameter, leaving a thick
-/// ~15px stroke so every color segment reads clearly.
-const RING_SIZE: f32 = 84.;
-const OUTER_RADIUS: f32 = 40.;
-const INNER_RADIUS: f32 = 25.;
+/// Ring geometry: hole ≈ 60% of the outer diameter, leaving a ~12px stroke
+/// so every color segment reads clearly at the smaller tile size.
+const RING_SIZE: f32 = 64.;
+const OUTER_RADIUS: f32 = 30.;
+const INNER_RADIUS: f32 = 18.;
 /// Small angular gap between segments so adjacent colors never blur.
 const PAD_ANGLE: f32 = 0.03;
 /// Colored categories below this share of the disk fold into "Other".
@@ -149,18 +152,72 @@ pub fn drive_summary(drive: &DriveInfo, cx: &App) -> String {
     text
 }
 
-/// One drive tile: the capacity ring with the free size centered in the
-/// hole, and the drive name underneath. The caller owns click/tooltip.
-pub fn drive_tile(drive: &DriveInfo, cx: &App) -> Div {
+fn drive_name(drive: &DriveInfo, is_bar: bool, cx: &App) -> impl IntoElement {
+    let mount = drive.mount.clone();
+    let label = div()
+        .when(is_bar, |label| label.w_full().text_left())
+        .when(!is_bar, |label| label.max_w(px(96.)).text_center())
+        .min_w_0()
+        .text_xs()
+        .truncate()
+        .text_color(cx.theme().sidebar_foreground)
+        .child(drive.name.clone());
+    label.context_menu(move |menu, _, cx| {
+        let current = PikuState::global(cx).nav.read(cx).drive_display(&mount);
+        menu.menu_with_check(
+            "Ring",
+            current == DriveDisplayMode::Ring,
+            Box::new(SetDriveDisplay(mount.clone(), DriveDisplayMode::Ring)),
+        )
+        .menu_with_check(
+            "Bar",
+            current == DriveDisplayMode::Bar,
+            Box::new(SetDriveDisplay(mount.clone(), DriveDisplayMode::Bar)),
+        )
+    })
+}
+
+fn capacity_bar(slices: &[RingSlice], cx: &App) -> Div {
+    let total: f32 = slices.iter().map(|slice| slice.bytes).sum();
+    div()
+        .flex()
+        .w_full()
+        .h(px(8.))
+        .rounded_full()
+        .overflow_hidden()
+        .bg(cx.theme().border)
+        .children(slices.iter().enumerate().map(|(ix, slice)| {
+            let fraction = if total > 0. {
+                (slice.bytes / total).clamp(0., 1.)
+            } else {
+                0.
+            };
+            div()
+                .h_full()
+                .w(relative(fraction))
+                .bg(slice.color)
+                .when(ix == 0, |segment| segment.rounded_l_full())
+                .when(ix + 1 == slices.len(), |segment| segment.rounded_r_full())
+        }))
+}
+
+/// One drive tile. The selected display changes only presentation; both views
+/// use the same capacity slices and the caller owns navigation and tooltip.
+pub fn drive_tile(drive: &DriveInfo, mode: DriveDisplayMode, cx: &App) -> Div {
     let slices = ring_slices(drive, cx);
-    let free_text = format_size(drive.available);
+    let used = drive.total.saturating_sub(drive.available);
+    let used_percent = if drive.total > 0 {
+        used as f64 / drive.total as f64 * 100.0
+    } else {
+        0.0
+    };
 
     let ring = div()
         .w(px(RING_SIZE))
         .h(px(RING_SIZE))
         .relative()
         .child(
-            PieChart::new(slices)
+            PieChart::new(slices.clone())
                 .value(|slice: &RingSlice| slice.bytes)
                 .color(|slice: &RingSlice| slice.color)
                 .inner_radius(INNER_RADIUS)
@@ -168,7 +225,7 @@ pub fn drive_tile(drive: &DriveInfo, cx: &App) -> Div {
                 .pad_angle(PAD_ANGLE),
         )
         .child(
-            // Free space centered in the ring's hole.
+            // Used percentage centered in the ring's hole.
             div()
                 .absolute()
                 .inset_0()
@@ -178,25 +235,55 @@ pub fn drive_tile(drive: &DriveInfo, cx: &App) -> Div {
                 .justify_center()
                 .child(
                     div()
-                        .text_xs()
+                        .max_w(px(36.))
+                        .truncate()
+                        .text_sm()
                         .text_color(cx.theme().sidebar_foreground)
-                        .child(free_text),
+                        .child(format!("{used_percent:.0}%")),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("free"),
+                        .child("used"),
                 ),
         );
 
-    v_flex().items_center().gap_1().p_1().child(ring).child(
-        div()
-            .max_w(px(96.))
-            .text_xs()
-            .text_center()
-            .truncate()
-            .text_color(cx.theme().sidebar_foreground)
-            .child(drive.name.clone()),
-    )
+    match mode {
+        DriveDisplayMode::Ring => v_flex()
+            .w(px(76.))
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .child(ring)
+            .child(drive_name(drive, false, cx)),
+        DriveDisplayMode::Bar => v_flex()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .child(drive_name(drive, true, cx))
+            .child(capacity_bar(&slices, cx))
+            .child(
+                gpui_component::h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .justify_between()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().flex_1().min_w_0().truncate().child(format!(
+                        "{} of {} used",
+                        format_size(used),
+                        format_size(drive.total)
+                    )))
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(format!("{} free", format_size(drive.available))),
+                    ),
+            ),
+    }
 }

@@ -468,37 +468,53 @@ impl Render for NavPanel {
                     .child(skeleton_rows(3, 24., cx)),
             )
         } else {
-            // Ring tiles flow two per row and wrap with the drive count.
-            v_flex().child(
-                h_flex().flex_wrap().mx_1().children(
-                    self.drives
-                        .iter()
-                        .enumerate()
-                        .map(|(ix, drive)| {
-                            let path = drive.mount.clone();
-                            let summary = super::drive_list::drive_summary(drive, cx);
-                            div()
-                                .id(SharedString::from(format!("drive-{ix}")))
-                                .w_1_2()
-                                .rounded(cx.theme().radius)
-                                .cursor_pointer()
-                                .hover(|style| style.bg(cx.theme().sidebar_accent))
-                                .on_click(move |_, window, cx| {
-                                    navigate_active(path.clone(), window, cx);
-                                })
-                                .tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(summary.clone())
-                                        .build(window, cx)
-                                })
-                                .child(super::drive_list::drive_tile(drive, cx))
-                        })
-                        .collect::<Vec<_>>(),
-                ),
+            // Compact ring tiles wrap to the available sidebar width.
+            v_flex().w_full().min_w_0().child(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .min_w_0()
+                    .mx_1()
+                    .gap_1()
+                    .justify_center()
+                    .children(
+                        self.drives
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, drive)| {
+                                let path = drive.mount.clone();
+                                let mode = nav.drive_display(&path);
+                                let summary = super::drive_list::drive_summary(drive, cx);
+                                let card = div()
+                                    .id(SharedString::from(format!("drive-{ix}")))
+                                    .rounded(cx.theme().radius)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(cx.theme().sidebar_accent))
+                                    .on_click(move |_, window, cx| {
+                                        navigate_active(path.clone(), window, cx);
+                                    })
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(summary.clone())
+                                            .build(window, cx)
+                                    })
+                                    .child(super::drive_list::drive_tile(drive, mode, cx));
+                                match mode {
+                                    crate::state::nav_model::DriveDisplayMode::Ring => {
+                                        card.w(px(76.)).flex_none()
+                                    }
+                                    crate::state::nav_model::DriveDisplayMode::Bar => {
+                                        card.w_full().min_w_0()
+                                    }
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
             )
         };
 
         v_flex()
             .size_full()
+            .min_w_0()
             .bg(cx.theme().sidebar)
             .child(super::workspace_switcher::workspace_switcher(self, cx))
             .child(
@@ -506,9 +522,11 @@ impl Render for NavPanel {
                     .id("nav-scroll")
                     .flex_1()
                     .min_h_0()
+                    .min_w_0()
                     .overflow_y_scroll()
                     .child(
                         v_flex()
+                            .min_w_0()
                             .py_2()
                             .gap_2()
                             .child(section(

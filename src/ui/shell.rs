@@ -19,9 +19,9 @@ use crate::app::actions::{
     CreateWorkspace, DeleteWorkspace, DuplicateTab, DuplicateWorkspace, NewTab, OpenMediaPanel,
     OpenPathInNewTab, PinTab, PreviewActualSize, PreviewFit, PreviewFitWidth, PreviewNextPage,
     PreviewPrevPage, PreviewResetView, PreviewRotate, PreviewZoomIn, PreviewZoomOut,
-    RemoveRecentPath, RenameWorkspace, RevealPreview, ShowAbout, SplitDown, SplitRight,
-    SwitchWorkspace, ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath, ToggleRightDock,
-    ToggleTransferCenter,
+    RemoveRecentPath, RenameWorkspace, RevealPreview, SetDriveDisplay, ShowAbout, SplitDown,
+    SplitRight, SwitchWorkspace, ToggleFavoritePath, ToggleLeftDock, TogglePinnedPath,
+    ToggleRightDock, ToggleTransferCenter,
 };
 use crate::state::PikuState;
 use crate::state::nav_model::NavModel;
@@ -778,6 +778,13 @@ impl Render for Workspace {
                     .nav
                     .clone()
                     .update(cx, |nav, cx| nav.remove_recent(&path, cx));
+            }))
+            .on_action(cx.listener(|_, action: &SetDriveDisplay, _, cx| {
+                let mount = action.0.clone();
+                PikuState::global(cx)
+                    .nav
+                    .clone()
+                    .update(cx, |nav, cx| nav.set_drive_display(mount, action.1, cx));
             }))
             .child(self.title_bar.clone())
             .child(div().flex_1().min_h_0().child(self.dock_area.clone()))

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use gpui::{Action, App, KeyBinding, actions};
 use serde::Deserialize;
 
+use crate::state::nav_model::DriveDisplayMode;
+
 /// Toggle a path in the favorites list (dispatched from context menus).
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = piku, no_json)]
@@ -19,6 +21,11 @@ pub struct TogglePinnedPath(pub PathBuf);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = piku, no_json)]
 pub struct RemoveRecentPath(pub PathBuf);
+
+/// Choose the capacity visualization for a drive in the active workspace.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = piku, no_json)]
+pub struct SetDriveDisplay(pub PathBuf, pub DriveDisplayMode);
 
 /// Switch to the workspace with the given id (dispatched from the switcher).
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
